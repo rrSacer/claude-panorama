@@ -7,10 +7,12 @@ Comando recomendado para validar + anexar histórico + gravar atomicamente (`066
   `panorama apply <slug> arquivo.json`
   `panorama apply <slug> - <<'EOF' ... EOF`
 
-Regras obrigatórias de engenharia e conteúdo:
-1. ZERO ANALOGIAS OU METÁFORAS: descreva sempre arquivos, structs, processos, memória, protocolos e testes reais.
-2. MÁXIMO DE DETALHES EM CAMADAS: use `tabs`, `section`, `expander`, `matrix`, `flow_graph`, `table`, `kpi_grid`, `progress_list`, `prose`, `alert` e `timeline`.
-3. `progresso` (0.0–100.0) mede apenas escopo implementado e verificado; `confianca` (0.0–100.0) mede a chance real atual de entrega funcional sem regressões.
+Regras obrigatórias de conteúdo (leia `AGENT_INSTRUCTIONS.md` do projeto claude-panorama para a versão completa):
+1. O LEITOR NÃO SABE NADA DO PROJETO: o painel deve explicar o que é, como funciona, quanto está pronto, o que está acontecendo agora e o que preocupa.
+2. LINGUAGEM SIMPLES: sem nomes de classe, struct, função, arquivo, commit, flag ou caminho no texto visível. Diga o que a coisa faz. Termo técnico inevitável → explique na primeira vez e coloque no `glossary`.
+3. ZERO ANALOGIAS OU METÁFORAS: explique o mecanismo real em palavras simples.
+4. CAMADAS, SEM DENSIDADE: topo de cada aba = visão rápida (no máximo 4 blocos visíveis, de preferência visuais: `cards`, `donut`, `steps`, `bar_chart`, `progress_list`); explicações em `expander` fechados; nomes técnicos só num `expander` final "Detalhes técnicos". Nenhum detalhe relevante é removido, só guardado na camada certa.
+5. `progresso` (0.0–100.0) mede apenas escopo feito e verificado; `confianca` (0.0–100.0) mede a chance real atual de o projeto ficar pronto e funcionar.
 
 ---
 
@@ -20,7 +22,7 @@ Regras obrigatórias de engenharia e conteúdo:
 {
   "slug": "meu-projeto",                    // opcional no input (preenchido pelo <slug> no `panorama apply`)
   "title": "Nome Real do Projeto",          // OBRIGATÓRIO
-  "subtitle": "Subtítulo técnico direto",   // opcional
+  "subtitle": "O que o projeto é, numa frase simples", // opcional
   "path": "/caminho/absoluto/do/repo",      // opcional
   "icon": "applications-engineering-symbolic", // opcional (qualquer ícone simbólico GNOME)
   "status": "ativo",                        // "ativo" | "validando" | "pausado" | "concluido" | "bloqueado"
@@ -160,13 +162,14 @@ Regras obrigatórias de engenharia e conteúdo:
 }
 ```
 
-### 2.8 `expander` — Linha expansível (`AdwExpanderRow`) com filhos arbitrários
+### 2.8 `expander` — Linha expansível (`AdwExpanderRow`) com filhos arbitrários — principal ferramenta contra a densidade
 `status`: `"ok"` | `"warn"` | `"err"` | `"neutral"`
 ```json
 {
   "type": "expander",
   "title": "Inspeção Profunda: Conflitos Upstream (14 arquivos)",
   "subtitle": "Comparação entre base fc0210381 e upstream a61e02d36",
+  "icon": "dialog-warning-symbolic",       // opcional: ícone simbólico GNOME à esquerda
   "badge": "14 arquivos",
   "status": "warn",
   "expanded": false,
@@ -259,6 +262,79 @@ Regras obrigatórias de engenharia e conteúdo:
       "detail": "Mapeados achados R7-1 a R7-4 com reprodução determinística.",
       "state": "running"
     }
+  ]
+}
+```
+
+### 2.13 `cards` — Cartões com ícone grande, título e texto curto
+`tone`: `"info"` | `"success"` | `"warning"` | `"danger"` | `"neutral"` (cor do selo do ícone)
+```json
+{
+  "type": "cards",
+  "columns": 3,
+  "items": [
+    {
+      "icon": "help-about-symbolic",
+      "title": "O que é",
+      "text": "Uma versão nova, mais rápida, de um mod antigo de tecnologia nuclear.",
+      "tone": "info"
+    }
+  ]
+}
+```
+
+### 2.14 `donut` — Rosca mostrando como um total se divide em partes
+`color` (opcional): `blue` | `teal` | `green` | `yellow` | `orange` | `red` | `pink` | `purple` | `brown` | `gray`. Sem `color`, usa a cor do `state`.
+```json
+{
+  "type": "donut",
+  "title": "Quanto do conteúdo já funciona",
+  "subtitle": "Contagem de blocos, itens e máquinas do mod original",
+  "center_value": "3.290",
+  "center_label": "itens no total",
+  "slices": [
+    { "label": "Funcionando", "value": 800, "state": "pass", "detail": "Já testado dentro do jogo" },
+    { "label": "Aparece mas não funciona", "value": 128, "state": "blocked" },
+    { "label": "Falta fazer", "value": 2362, "color": "gray" }
+  ]
+}
+```
+
+### 2.15 `bar_chart` — Barras horizontais com valores absolutos
+`max` opcional (padrão: maior valor). `value_label` opcional substitui o número exibido.
+```json
+{
+  "type": "bar_chart",
+  "title": "Verificações automáticas dentro do jogo",
+  "unit": "testes",
+  "bars": [
+    { "label": "Catálogo", "value": 251, "value_label": "251 de 251", "state": "pass", "detail": "Todos os blocos e itens registrados corretamente" }
+  ]
+}
+```
+
+### 2.16 `steps` — Jornada em etapas numeradas (clicar abre a descrição)
+```json
+{
+  "type": "steps",
+  "title": "Caminho até o fim",
+  "subtitle": "Clique numa etapa para ver o que ela inclui",
+  "first_number": 0,                       // opcional: número do primeiro círculo (padrão 1)
+  "steps": [
+    { "title": "Base", "description": "O que esta etapa entrega, em palavras simples.", "state": "pass" },
+    { "title": "Reatores", "description": "...", "state": "running" },
+    { "title": "Mísseis", "state": "pending" }
+  ]
+}
+```
+
+### 2.17 `glossary` — Termos explicados em linguagem simples
+```json
+{
+  "type": "glossary",
+  "title": "Glossário",
+  "items": [
+    { "term": "Save", "meaning": "A gravação do mundo no disco, para que nada se perca ao fechar o jogo." }
   ]
 }
 ```

@@ -1,87 +1,113 @@
-# Instrução Global — Dashboard Nativo GNOME (`claude-panorama`)
+# Instrução Global — Painel de Projetos (`claude-panorama`)
 
-Todo projeto conduzido pelo Claude (ou pelo Maestro e seus subagentes) DEVE registrar e manter atualizado seu painel em tempo real no **Claude Panorama** (`panorama` CLI / JSON em `/home/sacer/.local/share/claude-panorama/projects/<slug>.json`).
+Todo projeto conduzido pelo Claude (ou pelo Maestro e seus subagentes) DEVE criar e manter atualizado o seu painel no **Claude Panorama**. O painel é um arquivo JSON em `/home/sacer/.local/share/claude-panorama/projects/<slug>.json`, gravado com a CLI `panorama`. O app nativo do GNOME o mostra e recarrega sozinho quando o arquivo muda.
 
-## 1. Propósito do Dashboard
-Dar ao usuário visibilidade completa, fiel e atualizada sobre o estado real do projeto no aplicativo nativo GNOME:
-- **2 indicadores fixos obrigatórios** no topo de todo projeto:
-  1. **`confianca` (`0.0` a `100.0`)**: estimativa honesta e dinâmica da chance percentual de o projeto ficar pronto e funcionar com sucesso. Sobe quando provas empíricas, compilações e testes passam; desce imediatamente quando surgem conflitos graves, regressões, limites técnicos ou gargalos reais. Nunca congele um número decorativo: explique objetivamente o que sustenta (`confianca_fatores`) e o que reduz (`confianca_riscos`) essa porcentagem. No aplicativo, o anel circular Cairo assume automaticamente verde (`>= 75%`), âmbar (`45–74.9%`) ou vermelho (`< 45%`).
-  2. **`progresso` (`0.0` a `100.0`)**: porcentagem real de quanto do escopo total do projeto já está implementado e verificado (sem chutes otimistas; diferencie código escrito de código validado em `progresso_calculo`).
-- **Área dinâmica livre (`ui`)**: começa vazia e **você (o agente construtor do projeto) projeta, monta e reconstrói dinamicamente toda a interface abaixo dos 2 indicadores fixos**, adaptando os componentes visuais ao domínio específico do projeto e à etapa em que ele se encontra.
+## 1. Para quem o painel é escrito
 
-## 2. Regras Inegociáveis de Conteúdo e Estilo
-1. **ZERO ANALOGIAS OU METÁFORAS**: O usuário não gosta de analogias. Nunca compare software a construção civil, carros, cozinha, orquestras, encanamento etc. Explique sempre o mecanismo real de forma direta, clara, objetiva e acessível (ex.: diga exatamente qual arquivo, processo, protocolo, memória, fila ou teste está atuando, o que ele faz e qual o efeito prático).
-2. **MÁXIMO DE DETALHES POSSÍVEL (estruturado em camadas)**:
-   - O panorama NÃO é um resumo raso de 3 linhas. Ele deve conter **todos os detalhes relevantes do projeto**: arquitetura real, módulos/subsistemas, arquivos críticos, ondas/etapas, testes executados vs. pendentes (com contagens reais), métricas de desempenho/hardware, subagentes ativos, decisões técnicas tomadas, gargalos atuais, falhas abertas e próximos passos exatos.
-   - Use **abas (`tabs`)**, **grupos (`section`)**, **matrizes visuais (`matrix`)**, **diagramas de fluxo/arquitetura (`flow_graph`)**, **tabelas (`table`)** e **linhas expansíveis (`expander`)** para entregar densidade máxima de detalhes sem poluir a leitura inicial: o topo explica claramente o momento atual, e cada seção/expander entrega a radiografia profunda.
-3. **CRIATIVIDADE ADAPTADA AO PROJETO E À FASE**:
-   - A estrutura da UI não é um formulário fixo: adapte-a à natureza do projeto:
-     - *Projeto de motor/mod/compilador*: mostre ondas de engenharia, matriz de baterias de testes/crashes, cobertura de famílias de máquinas/blocos, alocação de núcleos/threads/RAM, conflitos de merge.
-     - *Projeto de rede/streaming/daemon*: mostre topologia do pipeline de captura → codificação → transporte, latência medida, estados dos serviços systemd/sockets, protocolos.
-     - *Projeto de app/web/ferramenta*: mostre telas/rotas prontas, contratos de dados, integrações, validações de build.
-   - Conforme o projeto avança (ex.: de *Planejamento* → *Implementação* → *Validação Massiva* → *Revisão Final*), reorganize os widgets dinamicamente para destacar o que está acontecendo **agora**.
+O leitor é **alguém que não sabe nada do projeto**. Ele abre o painel e precisa sair entendendo:
 
-## 3. Quando Atualizar
-Atualize o JSON do projeto sempre que:
-- Iniciar ou assumir um projeto (crie o registro inicial imediatamente);
-- Concluir uma etapa, módulo, commit ou onda;
-- Disparar, avançar ou encerrar baterias de testes ou subagentes;
-- Descobrir um bug, gargalo ou mudança de escopo que altere `progresso` ou `confianca`;
-- Finalizar um turno relevante de engenharia.
+1. **O que é o projeto** e para que serve;
+2. **Como ele funciona**, em linhas gerais;
+3. **Quanto já está pronto** e **o que falta**;
+4. **O que está acontecendo agora** e **o que vem depois**;
+5. **O que está dando errado** ou preocupa, e por que isso importa.
 
-## 4. Referência Exata da CLI (`panorama` / `claude-panorama`)
-Os binários estão instalados em `/home/sacer/.local/bin/panorama` e `/home/sacer/.local/bin/claude-panorama`:
+Se uma frase só faz sentido para quem já leu o código, ela está escrita para o leitor errado.
 
-- `claude-panorama` ou `panorama gui`
-  Abre a janela nativa GNOME (`AdwApplicationWindow` + `AdwNavigationSplitView`) com recarregamento em tempo real (`GIO FileMonitor` + fallback de 2s) preservando projeto selecionado, aba ativa, `expander`s abertos e posição de rolagem.
-- `panorama schema`
-  Imprime no `stdout` a especificação JSON completa e comentada de todos os campos de topo e exemplos prontos de todos os 12 blocos `UiNode`.
-- `panorama list`
-  Lista os projetos registrados em `/home/sacer/.local/share/claude-panorama/projects` com status, `progresso`, `confianca` e timestamp.
-- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."]`
-  Inicializa atomicamente um novo projeto com permissões compartilhadas (`0666` no arquivo, `0777` no diretório, compatível entre `root` e `sacer`).
-- `panorama validate <arquivo.json>`
-  Valida sintaxe JSON, nomes de campos (rejeita chaves com erro de digitação informando linha/coluna), faixas `0.0..=100.0`, consistência de colunas de tabelas e referências de nós em `flow_graph`.
-- `panorama apply <slug> [arquivo.json | -]`
-  Valida o JSON (de arquivo ou `stdin`), preserva/anexa automaticamente um novo ponto em `history`, calcula `progresso_delta` e `confianca_delta` se omitidos, e grava de forma atômica (`.tmp` + `fsync` + `rename` com modo `0666`).
+## 2. Regras de escrita
 
-Exemplo rápido via heredoc:
-```bash
-panorama apply meu-projeto - <<'EOF'
-{
-  "title": "Meu Projeto",
-  "status": "ativo",
-  "phase": "Implementação do Core",
-  "progresso": 40.0,
-  "progresso_calculo": "2 de 5 subsistemas implementados com suíte de testes passando.",
-  "confianca": 82.0,
-  "confianca_resumo": "Contratos principais provados em testes de integração.",
-  "confianca_fatores": ["Build limpo e 48 testes unitários verdes"],
-  "confianca_riscos": ["Integração IPC ainda não exercitada sob carga"],
-  "ui": []
-}
-EOF
-```
+1. **Linguagem simples e direta.** Escreva como se explicasse a uma pessoa inteligente que nunca viu o projeto. Frases curtas. Um assunto por frase.
+2. **Sem jargão na camada visível.** Nada de nomes de classe, struct, função, arquivo, commit, flag, variável de ambiente ou caminho de pasta no texto principal. Diga **o que a coisa faz**, não como ela se chama no código.
+   - Ruim: "128 blocos `Kind::Inert` em `crates/ntm-core/src/registry.rs`".
+   - Bom: "128 blocos já aparecem no jogo, mas ainda não fazem nada quando você interage com eles".
+3. **Termo técnico inevitável → explique na primeira vez** e coloque-o no **glossário** (`glossary`). Ex.: "o *save* (a gravação do mundo no disco)".
+4. **Sem analogias nem metáforas.** O usuário não gosta delas. Explique o mecanismo real em palavras simples, sem comparar com carros, cozinha, construção etc.
+5. **Números com contexto.** "683 verificações automáticas passaram" é melhor que "683 checks". Diga de quê, e se é bom ou ruim.
+6. **Nada de conteúdo perdido.** Todo detalhe relevante continua no painel, só que **organizado em camadas** (seção 3).
 
-## 5. Resumo Conciso da Raiz JSON e dos 12 Blocos `UiNode`
+## 3. Organização em camadas (não deixar a tela densa)
 
-### Campos de topo (`ProjectDocument`)
-- Obrigatório: `title` (`string`).
-- Principais opcionais (`#[serde(default)]`): `slug`, `subtitle`, `path`, `icon` (ex.: `"applications-engineering-symbolic"`, `"utilities-terminal-symbolic"`, `"cpu-symbolic"`), `status` (`"ativo"` | `"validando"` | `"pausado"` | `"concluido"` | `"bloqueado"`), `phase`, `updated_at`.
-- Progresso fixo: `progresso` (`0.0..=100.0`), `progresso_delta` (`number` opcional), `progresso_subtitulo`, `progresso_calculo`.
-- Confiança fixa: `confianca` (`0.0..=100.0`), `confianca_delta` (`number` opcional), `confianca_resumo`, `confianca_fatores` (`string[]`), `confianca_riscos` (`string[]`).
-- Histórico e UI: `history` (`[{ "timestamp", "progresso", "confianca", "note" }]`), `ui` (`UiNode[]`).
+O painel nunca deve despejar tudo de uma vez. Use três camadas:
 
-### Blocos `UiNode` (sempre identificados por `"type": "<nome>"`)
-1. **`tabs`**: `{ "type": "tabs", "id": "main", "tabs": [{ "id": "visao", "title": "Visão Geral", "icon": "view-grid-symbolic", "children": [...] }] }`
-2. **`section`**: `{ "type": "section", "title": "...", "description": "...", "children": [...] }` (`AdwPreferencesGroup`).
-3. **`columns`**: `{ "type": "columns", "columns": 2, "children": [...] }` (grade responsiva lado a lado).
-4. **`prose`**: `{ "type": "prose", "title": "...", "tone": "neutral|info|success|warning|danger", "body": "Parágrafos com `código` e **negrito**\n- Bullet", "bullets": ["..."] }`.
-5. **`alert`**: `{ "type": "alert", "level": "info|success|warning|danger", "title": "...", "message": "..." }`.
-6. **`kpi_grid`**: `{ "type": "kpi_grid", "items": [{ "label": "...", "value": "...", "sublabel": "...", "status": "ok|warn|err|neutral" }] }`.
-7. **`progress_list`**: `{ "type": "progress_list", "title": "...", "items": [{ "label": "...", "percent": 75.0, "detail": "...", "status": "ok|warn|err|neutral" }] }`.
-8. **`expander`**: `{ "type": "expander", "title": "...", "subtitle": "...", "badge": "63/63 OK", "status": "ok|warn|err|neutral", "expanded": false, "children": [...] }` (`AdwExpanderRow` aninhando qualquer `UiNode`).
-9. **`matrix`**: `{ "type": "matrix", "title": "...", "subtitle": "...", "columns": 6, "cells": [{ "label": "...", "sublabel": "...", "state": "pass|running|fail|pending|blocked|reserved", "detail": "..." }] }` (grade densa Cairo com tooltip e popover de inspeção ao clicar).
-10. **`flow_graph`**: `{ "type": "flow_graph", "title": "...", "subtitle": "...", "nodes": [{ "id": "n1", "label": "...", "sublabel": "...", "state": "pass|running|fail|pending|blocked|reserved", "col": 0, "detail": "..." }], "edges": [{ "from": "n1", "to": "n2", "label": "..." }] }` (diagrama vetorial Cairo clicável).
-11. **`table`**: `{ "type": "table", "title": "...", "columns": ["Col A", "Col B"], "rows": [["...", "..."]] }` (com quebra `WordChar` sem truncar texto).
-12. **`timeline`**: `{ "type": "timeline", "title": "...", "items": [{ "timestamp": "...", "title": "...", "detail": "...", "state": "pass|running|fail|pending|blocked|reserved" }] }`.
+| Camada | Onde fica | O que contém |
+|---|---|---|
+| **1. Visão rápida** | Topo de cada aba, sempre visível | 1 alerta ou cartão curto com o momento atual + 1 ou 2 visuais (rosca, etapas, barras, cartões). Lê-se em 30 segundos. |
+| **2. Explicação** | `expander`s fechados (`"expanded": false`), com título claro e subtítulo de uma linha | O porquê, o como, a lista completa, o que falta em cada parte. Texto simples. |
+| **3. Detalhe técnico** | Um `expander` final em cada aba, chamado **"Detalhes técnicos"** (ícone `applications-engineering-symbolic`), fechado | Aqui (e só aqui) podem aparecer nomes de arquivo, classe, commit, linha de código, para quem for mexer no projeto. |
+
+Regras de densidade:
+- No máximo **4 blocos visíveis** por aba antes do primeiro `expander`.
+- Listas longas (mais de ~6 itens), tabelas e explicações vão **dentro de `expander`**.
+- Prefira **um visual a um parágrafo** quando o conteúdo for número, proporção, sequência ou estado.
+- Textos curtos: `prose` com no máximo ~4 frases; o resto vai para um `expander`.
+
+## 4. Estrutura recomendada de abas
+
+Adapte ao projeto, mas comece por esta base:
+
+1. **Começo aqui**: o que é o projeto (`cards`), como funciona (`flow_graph` com rótulos simples), o momento atual (`alert`) e o glossário (`glossary` dentro de `expander`).
+2. **Progresso**: jornada em etapas (`steps`), quanto está pronto (`donut`), progresso por parte (`progress_list` ou `bar_chart`), detalhes de cada parte em `expander`s.
+3. **Agora**: o que está sendo feito, o que travou e por quê (`alert`, `cards`, `expander`s com cada problema explicado: o que acontece, por que importa, como será resolvido).
+4. **Testes e qualidade**: o que já foi verificado (`bar_chart`/`matrix`), em linguagem simples.
+5. Abas específicas do domínio (máquina, servidor, hardware, migração etc.), seguindo as mesmas camadas.
+
+Use ícones simbólicos do GNOME nas abas, nos `cards` e nos `expander`s (ex.: `help-about-symbolic`, `view-grid-symbolic`, `object-select-symbolic`, `dialog-warning-symbolic`, `media-playlist-repeat-symbolic`, `computer-symbolic`, `folder-symbolic`, `system-run-symbolic`). Antes de usar um ícone, confira se ele existe no tema instalado: `find /usr/share/icons/Adwaita -name "<nome>.svg"`. Ícone inexistente aparece como um quadrado vazio.
+
+## 5. Os dois indicadores fixos do topo
+
+- **`progresso` (0.0–100.0)**: quanto do escopo total já está **feito e verificado**. Código escrito sem prova não conta.
+  - `progresso_subtitulo`: uma linha simples ("cerca de 1/4 do jogo original já funciona").
+  - `progresso_calculo`: como o número foi obtido, em linguagem simples. Fica recolhido em "Como esse número é calculado".
+- **`confianca` (0.0–100.0)**: chance honesta, hoje, de o projeto ficar pronto e funcionar. Sobe com provas; desce com problemas reais. Nunca um número decorativo.
+  - `confianca_resumo`: 1 ou 2 frases simples, sempre visíveis.
+  - `confianca_fatores` / `confianca_riscos`: frases simples, sem jargão. Ficam recolhidas em "O que dá segurança" e "O que ainda preocupa".
+- `subtitle` e `phase` também em linguagem simples ("Fase atual: corrigindo a gravação do mundo").
+
+## 6. Quando atualizar
+
+Atualize o painel sempre que:
+- iniciar ou assumir um projeto (crie o registro na hora);
+- concluir uma etapa, módulo ou onda;
+- iniciar, avançar ou encerrar testes ou subagentes;
+- descobrir um problema ou mudança de escopo que altere `progresso` ou `confianca`;
+- terminar um turno relevante de trabalho.
+
+## 7. CLI (`panorama` / `claude-panorama`)
+
+Binários em `/home/sacer/.local/bin/`.
+
+- `claude-panorama` ou `panorama gui`: abre a janela.
+- `panorama schema`: imprime a especificação completa com exemplos de todos os blocos.
+- `panorama list`: lista os projetos.
+- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."]`: cria um projeto.
+- `panorama validate <arquivo.json>`: valida o JSON (campos, faixas, cores, referências).
+- `panorama apply <slug> [arquivo.json | -]`: valida, anexa um ponto ao histórico, calcula as variações e grava de forma atômica.
+
+## 8. Blocos disponíveis (`"type": "..."`)
+
+Estrutura:
+- **`tabs`**: abas. `{ "type": "tabs", "tabs": [{ "id": "inicio", "title": "Começo aqui", "icon": "help-about-symbolic", "children": [...] }] }`
+- **`section`**: grupo com título e descrição. `{ "type": "section", "title": "...", "description": "...", "children": [...] }`
+- **`columns`**: blocos lado a lado. `{ "type": "columns", "columns": 2, "children": [...] }`
+- **`expander`**: linha que abre e fecha. É a principal ferramenta contra a densidade. `{ "type": "expander", "title": "...", "subtitle": "uma linha", "icon": "dialog-warning-symbolic", "badge": "4 itens", "status": "ok|warn|err|neutral", "expanded": false, "children": [...] }`
+
+Texto:
+- **`prose`**: cartão de texto. `{ "type": "prose", "title": "...", "tone": "neutral|info|success|warning|danger", "body": "...", "bullets": ["..."] }`
+- **`alert`**: aviso em destaque. `{ "type": "alert", "level": "info|success|warning|danger", "title": "...", "message": "..." }`
+- **`cards`**: cartões com ícone grande, título e texto curto. Ótimo para "o que é", "como funciona", "próximos passos". `{ "type": "cards", "columns": 3, "items": [{ "icon": "help-about-symbolic", "title": "...", "text": "...", "tone": "info|success|warning|danger|neutral" }] }`
+- **`glossary`**: termos explicados. `{ "type": "glossary", "title": "Glossário", "items": [{ "term": "Save", "meaning": "A gravação do mundo no disco." }] }`
+
+Visuais:
+- **`kpi_grid`**: cartões de números. `{ "type": "kpi_grid", "items": [{ "label": "...", "value": "...", "sublabel": "...", "status": "ok|warn|err|neutral" }] }`
+- **`donut`**: rosca mostrando como um total se divide. `{ "type": "donut", "title": "...", "center_value": "3.290", "center_label": "itens no total", "slices": [{ "label": "Funcionando", "value": 800, "state": "pass", "detail": "..." }, { "label": "Falta fazer", "value": 2490, "color": "gray" }] }`
+- **`bar_chart`**: barras horizontais com valores absolutos. `{ "type": "bar_chart", "title": "...", "unit": "testes", "max": 300, "bars": [{ "label": "...", "value": 133, "value_label": "133 de 133", "state": "pass", "detail": "..." }] }`
+- **`progress_list`**: barras de porcentagem. `{ "type": "progress_list", "title": "...", "items": [{ "label": "...", "percent": 75.0, "detail": "...", "status": "ok|warn|err|neutral" }] }`
+- **`steps`**: jornada em etapas numeradas; clicar numa etapa mostra a descrição. `{ "type": "steps", "title": "...", "subtitle": "...", "first_number": 1, "steps": [{ "title": "Base", "description": "...", "state": "pass" }] }`
+- **`timeline`**: linha do tempo. `{ "type": "timeline", "title": "...", "items": [{ "timestamp": "07/11 12:40", "title": "...", "detail": "...", "state": "..." }] }`
+- **`matrix`**: grade de quadradinhos clicáveis. `{ "type": "matrix", "title": "...", "columns": 6, "cells": [{ "label": "...", "sublabel": "...", "state": "...", "detail": "..." }] }`
+- **`flow_graph`**: diagrama de caixas e setas, clicável. `{ "type": "flow_graph", "title": "...", "nodes": [{ "id": "a", "label": "...", "sublabel": "...", "state": "...", "col": 0, "detail": "..." }], "edges": [{ "from": "a", "to": "b", "label": "..." }] }`
+- **`table`**: tabela. `{ "type": "table", "title": "...", "columns": ["A", "B"], "rows": [["...", "..."]] }`. Use pouco e quase sempre dentro de `expander`.
+
+Valores aceitos:
+- `state`: `pass` (pronto), `running` (em andamento), `fail` (com falha), `pending` (a fazer), `blocked` (travado), `reserved` (reservado).
+- `color`: `blue`, `teal`, `green`, `yellow`, `orange`, `red`, `pink`, `purple`, `brown`, `gray`. Sem `color`, a cor vem do `state`.
