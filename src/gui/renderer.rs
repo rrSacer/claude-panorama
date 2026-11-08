@@ -1,0 +1,1129 @@
+use crate::gui::charts::{
+    build_flow_graph_widget, build_matrix_widget, build_ring_gauge, build_sparkline, GaugeKind,
+};
+use crate::model::{
+    KpiStatus, ProjectDocument, Tone, UiNode,
+};
+use gtk4::glib;
+use gtk4::pango;
+use gtk4::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::f64::consts::TAU;
+use std::rc::Rc;
+
+#[derive(Default, Clone)]
+pub struct UiViewState {
+    pub active_tabs: Rc<RefCell<HashMap<String, String>>>,
+    pub expanded_rows: Rc<RefCell<HashMap<String, bool>>>,
+}
+
+pub fn render_project_view(doc: &ProjectDocument, state: &UiViewState) -> gtk4::Widget {
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
+    root.set_margin_top(16);
+    root.set_margin_bottom(28);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+
+    // 1. Faixa de identificação do projeto
+    root.append(&build_project_banner(doc));
+
+    // 2. Cabeçalho Fixo Obrigatório (Progresso + Confiança)
+    root.append(&build_fixed_header_pair(doc));
+
+    // 3. Área Dinâmica Livre (`ui`)
+    if doc.ui.is_empty() {
+        let slug_cmd = if doc.slug.is_empty() {
+            "<slug>"
+        } else {
+            doc.slug.as_str()
+        };
+        let status_page = adw::StatusPage::builder()
+            .icon_name("utilities-terminal-symbolic")
+            .title("Aguardando panorama dinâmico do agente")
+            .description(format!(
+                "Os indicadores fixos já estão ativos acima.\nPara construir abas, matrizes, grafos e tabelas dinâmicas neste projeto, execute:\n\npanorama apply {slug_cmd} panorama.json"
+            ))
+            .vexpand(true)
+            .build();
+        status_page.add_css_class("compact");
+        let wrap_card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        wrap_card.add_css_class("card");
+        wrap_card.append(&status_page);
+        root.append(&wrap_card);
+    } else {
+        let dynamic_box = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
+        for (idx, node) in doc.ui.iter().enumerate() {
+            let path_key = format!("{}::root[{idx}]", doc.slug);
+            dynamic_box.append(&render_ui_node(node, &doc.slug, &path_key, state));
+        }
+        root.append(&dynamic_box);
+    }
+
+    let clamp = adw::Clamp::builder()
+        .maximum_size(1360)
+        .tightening_threshold(920)
+        .child(&root)
+        .build();
+
+    clamp.upcast()
+}
+
+fn build_project_banner(doc: &ProjectDocument) -> gtk4::Widget {
+    let banner = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
+    banner.add_css_class("card");
+    banner.add_css_class("project-banner-card");
+
+    let icon = gtk4::Image::from_icon_name(&doc.icon);
+    icon.set_pixel_size(32);
+    icon.set_valign(gtk4::Align::Center);
+    icon.add_css_class("accent");
+    banner.append(&icon);
+
+    let text_col = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    text_col.set_hexpand(true);
+
+    let title_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let title_lbl = gtk4::Label::new(Some(&doc.title));
+    title_lbl.add_css_class("title-2");
+    title_lbl.set_xalign(0.0);
+    title_lbl.set_wrap(true);
+    title_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    title_row.append(&title_lbl);
+
+    let badge = gtk4::Label::new(Some(doc.status.display_label()));
+    badge.add_css_class("status-pill");
+    badge.add_css_class(doc.status.css_class());
+    badge.set_valign(gtk4::Align::Center);
+    title_row.append(&badge);
+    text_col.append(&title_row);
+
+    if !doc.subtitle.trim().is_empty() {
+        let sub = gtk4::Label::new(Some(&doc.subtitle));
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        sub.set_wrap_mode(pango::WrapMode::WordChar);
+        sub.add_css_class("dim-label");
+        text_col.append(&sub);
+    }
+
+    let meta_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
+    if !doc.path.trim().is_empty() {
+        let path_lbl = gtk4::Label::new(Some(&format!("Repositório: {}", doc.path)));
+        path_lbl.add_css_class("caption");
+        path_lbl.add_css_class("monospace");
+        path_lbl.add_css_class("dim-label");
+        path_lbl.set_xalign(0.0);
+        path_lbl.set_wrap(true);
+        path_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        path_lbl.set_selectable(true);
+        meta_row.append(&path_lbl);
+    }
+    if !doc.updated_at.trim().is_empty() {
+        let upd = gtk4::Label::new(Some(&format!("Atualizado: {}", doc.updated_at)));
+        upd.add_css_class("caption");
+        upd.add_css_class("dim-label");
+        upd.set_xalign(0.0);
+        meta_row.append(&upd);
+    }
+    text_col.append(&meta_row);
+
+    banner.append(&text_col);
+    banner.upcast()
+}
+
+fn build_fixed_header_pair(doc: &ProjectDocument) -> gtk4::Widget {
+    let flow = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .max_children_per_line(2)
+        .min_children_per_line(1)
+        .column_spacing(14)
+        .row_spacing(14)
+        .homogeneous(false)
+        .hexpand(true)
+        .build();
+
+    let prog_card = build_fixed_progresso_card(doc);
+    let conf_card = build_fixed_confianca_card(doc);
+
+    let child1 = gtk4::FlowBoxChild::builder()
+        .focusable(false)
+        .hexpand(true)
+        .valign(gtk4::Align::Fill)
+        .child(&prog_card)
+        .build();
+    let child2 = gtk4::FlowBoxChild::builder()
+        .focusable(false)
+        .hexpand(true)
+        .valign(gtk4::Align::Fill)
+        .child(&conf_card)
+        .build();
+
+    flow.append(&child1);
+    flow.append(&child2);
+    flow.upcast()
+}
+
+fn build_fixed_progresso_card(doc: &ProjectDocument) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    card.add_css_class("card");
+    card.add_css_class("fixed-metric-card");
+    card.set_hexpand(true);
+    card.set_vexpand(true);
+
+    // Linha título + delta recente
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let title = gtk4::Label::new(Some("Progresso do Escopo"));
+    title.add_css_class("title-4");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    top.append(&title);
+
+    if let Some(delta) = doc.progresso_delta {
+        top.append(&build_delta_badge(delta));
+    }
+    card.append(&top);
+
+    // Anel circular Cairo + resumo lateral
+    let mid = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);
+    let ring = build_ring_gauge(doc.progresso, GaugeKind::Progresso);
+    mid.append(&ring);
+
+    let info_col = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    info_col.set_hexpand(true);
+    info_col.set_valign(gtk4::Align::Center);
+
+    let phase_txt = if doc.phase.trim().is_empty() {
+        "Fase atual: não especificada".to_string()
+    } else {
+        format!("Fase atual: {}", doc.phase)
+    };
+    let phase_lbl = gtk4::Label::new(Some(&phase_txt));
+    phase_lbl.add_css_class("heading");
+    phase_lbl.set_xalign(0.0);
+    phase_lbl.set_wrap(true);
+    phase_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    info_col.append(&phase_lbl);
+
+    if !doc.progresso_subtitulo.trim().is_empty() {
+        let sub = gtk4::Label::new(Some(&doc.progresso_subtitulo));
+        sub.add_css_class("caption");
+        sub.add_css_class("dim-label");
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        sub.set_wrap_mode(pango::WrapMode::WordChar);
+        info_col.append(&sub);
+    }
+
+    let pbar = gtk4::ProgressBar::new();
+    pbar.set_fraction((doc.progresso / 100.0).clamp(0.0, 1.0));
+    pbar.set_hexpand(true);
+    pbar.add_css_class("panorama-linear-bar");
+    info_col.append(&pbar);
+
+    mid.append(&info_col);
+    card.append(&mid);
+
+    card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+
+    let calc_hdr = gtk4::Label::new(Some("Critério de cálculo do progresso:"));
+    calc_hdr.add_css_class("caption-heading");
+    calc_hdr.add_css_class("dim-label");
+    calc_hdr.set_xalign(0.0);
+    card.append(&calc_hdr);
+
+    let calc_txt = if doc.progresso_calculo.trim().is_empty() {
+        "Sem fórmula de cálculo detalhada informada neste JSON."
+    } else {
+        doc.progresso_calculo.as_str()
+    };
+    let calc_lbl = gtk4::Label::new(Some(calc_txt));
+    calc_lbl.set_xalign(0.0);
+    calc_lbl.set_wrap(true);
+    calc_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    calc_lbl.set_selectable(true);
+    card.append(&calc_lbl);
+
+    card.upcast()
+}
+
+fn build_fixed_confianca_card(doc: &ProjectDocument) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    card.add_css_class("card");
+    card.add_css_class("fixed-metric-card");
+    card.set_hexpand(true);
+    card.set_vexpand(true);
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let title = gtk4::Label::new(Some("Confiança de Sucesso"));
+    title.add_css_class("title-4");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    top.append(&title);
+
+    let band_lbl = if doc.confianca >= 75.0 {
+        let l = gtk4::Label::new(Some("Alta (>=75%)"));
+        l.add_css_class("mini-pill");
+        l.add_css_class("pill-pass");
+        l
+    } else if doc.confianca >= 45.0 {
+        let l = gtk4::Label::new(Some("Moderada (45–74%)"));
+        l.add_css_class("mini-pill");
+        l.add_css_class("pill-bloc");
+        l
+    } else {
+        let l = gtk4::Label::new(Some("Crítica (<45%)"));
+        l.add_css_class("mini-pill");
+        l.add_css_class("pill-fail");
+        l
+    };
+    top.append(&band_lbl);
+
+    if let Some(delta) = doc.confianca_delta {
+        top.append(&build_delta_badge(delta));
+    }
+    card.append(&top);
+
+    let mid = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);
+    let ring = build_ring_gauge(doc.confianca, GaugeKind::Confianca);
+    mid.append(&ring);
+
+    let summary_col = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    summary_col.set_hexpand(true);
+    summary_col.set_valign(gtk4::Align::Center);
+
+    if !doc.confianca_resumo.trim().is_empty() {
+        let res_lbl = gtk4::Label::new(Some(&doc.confianca_resumo));
+        res_lbl.set_xalign(0.0);
+        res_lbl.set_wrap(true);
+        res_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        res_lbl.set_selectable(true);
+        summary_col.append(&res_lbl);
+    }
+
+    // Fatores que sustentam a confiança
+    if !doc.confianca_fatores.is_empty() {
+        let f_hdr = gtk4::Label::new(Some("Fatores que sustentam a confiança:"));
+        f_hdr.add_css_class("caption-heading");
+        f_hdr.add_css_class("text-ok");
+        f_hdr.set_xalign(0.0);
+        summary_col.append(&f_hdr);
+
+        for item in &doc.confianca_fatores {
+            summary_col.append(&build_icon_bullet_row(
+                "emblem-ok-symbolic",
+                "text-ok",
+                item,
+            ));
+        }
+    }
+
+    // Riscos / gargalos que reduzem a confiança
+    if !doc.confianca_riscos.is_empty() {
+        let r_hdr = gtk4::Label::new(Some("Riscos / gargalos que reduzem a confiança:"));
+        r_hdr.add_css_class("caption-heading");
+        r_hdr.add_css_class("text-warn");
+        r_hdr.set_xalign(0.0);
+        summary_col.append(&r_hdr);
+
+        for item in &doc.confianca_riscos {
+            summary_col.append(&build_icon_bullet_row(
+                "dialog-warning-symbolic",
+                "text-warn",
+                item,
+            ));
+        }
+    }
+
+    mid.append(&summary_col);
+    card.append(&mid);
+
+    if !doc.history.is_empty() {
+        card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+        card.append(&build_sparkline(&doc.history));
+    }
+
+    card.upcast()
+}
+
+fn build_delta_badge(delta: f64) -> gtk4::Label {
+    let txt = if delta > 0.0 {
+        format!("+{delta:.1}%")
+    } else {
+        format!("{delta:.1}%")
+    };
+    let lbl = gtk4::Label::new(Some(&txt));
+    lbl.add_css_class("mini-pill");
+    if delta > 0.04 {
+        lbl.add_css_class("pill-pass");
+    } else if delta < -0.04 {
+        lbl.add_css_class("pill-fail");
+    } else {
+        lbl.add_css_class("pill-pend");
+    }
+    lbl
+}
+
+fn build_icon_bullet_row(icon_name: &str, icon_css: &str, text: &str) -> gtk4::Widget {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    let ic = gtk4::Image::from_icon_name(icon_name);
+    ic.set_pixel_size(14);
+    ic.set_valign(gtk4::Align::Start);
+    ic.set_margin_top(3);
+    ic.add_css_class(icon_css);
+
+    let lbl = gtk4::Label::new(None);
+    lbl.set_markup(&inline_rich_markup(text));
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    lbl.set_wrap(true);
+    lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    lbl.add_css_class("caption");
+    lbl.set_selectable(true);
+
+    row.append(&ic);
+    row.append(&lbl);
+    row.upcast()
+}
+
+fn render_ui_node(
+    node: &UiNode,
+    slug: &str,
+    path_key: &str,
+    state: &UiViewState,
+) -> gtk4::Widget {
+    match node {
+        UiNode::Tabs { id, tabs } => {
+            let stack_key = format!(
+                "{slug}::tabs::{}",
+                id.as_deref().unwrap_or(path_key)
+            );
+            let wrapper = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+
+            let switcher_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            switcher_row.add_css_class("panorama-tab-bar");
+
+            let view_stack = adw::ViewStack::new();
+            view_stack.set_vhomogeneous(false);
+            view_stack.set_hhomogeneous(false);
+
+            let saved_tab = state.active_tabs.borrow().get(&stack_key).cloned();
+            let mut first_id: Option<String> = None;
+            let mut buttons: Vec<(String, gtk4::ToggleButton)> = Vec::new();
+
+            for (t_idx, tab) in tabs.iter().enumerate() {
+                let tab_id = if tab.id.is_empty() {
+                    format!("tab_{t_idx}")
+                } else {
+                    tab.id.clone()
+                };
+                if first_id.is_none() {
+                    first_id = Some(tab_id.clone());
+                }
+
+                let page_box = gtk4::Box::new(gtk4::Orientation::Vertical, 14);
+                page_box.set_margin_top(4);
+                for (c_idx, child) in tab.children.iter().enumerate() {
+                    let child_key = format!("{path_key}::tab[{tab_id}]::c[{c_idx}]");
+                    page_box.append(&render_ui_node(child, slug, &child_key, state));
+                }
+
+                view_stack.add_titled(&page_box, Some(&tab_id), &tab.title);
+
+                let btn_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+                if let Some(ic_name) = tab.icon.as_deref().filter(|s| !s.is_empty()) {
+                    let img = gtk4::Image::from_icon_name(ic_name);
+                    img.set_pixel_size(15);
+                    btn_content.append(&img);
+                }
+                let btn_lbl = gtk4::Label::new(Some(&tab.title));
+                btn_lbl.add_css_class("heading");
+                btn_content.append(&btn_lbl);
+
+                let btn = gtk4::ToggleButton::builder().child(&btn_content).build();
+                btn.add_css_class("panorama-tab-btn");
+                if let Some((_, first_btn)) = buttons.first() {
+                    btn.set_group(Some(first_btn));
+                }
+                buttons.push((tab_id, btn));
+            }
+
+            let target_id = saved_tab
+                .filter(|saved| buttons.iter().any(|(id, _)| id == saved))
+                .or(first_id);
+
+            for (tab_id, btn) in &buttons {
+                if target_id.as_deref() == Some(tab_id.as_str()) {
+                    btn.set_active(true);
+                    view_stack.set_visible_child_name(tab_id);
+                }
+                let vs = view_stack.clone();
+                let tid = tab_id.clone();
+                let skey = stack_key.clone();
+                let tabs_map = state.active_tabs.clone();
+                btn.connect_toggled(move |b| {
+                    if b.is_active() {
+                        vs.set_visible_child_name(&tid);
+                        tabs_map.borrow_mut().insert(skey.clone(), tid.clone());
+                    }
+                });
+                switcher_row.append(btn);
+            }
+
+            let switcher_scroll = gtk4::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk4::PolicyType::Automatic)
+                .vscrollbar_policy(gtk4::PolicyType::Never)
+                .hexpand(true)
+                .child(&switcher_row)
+                .build();
+
+            wrapper.append(&switcher_scroll);
+            wrapper.append(&view_stack);
+            wrapper.upcast()
+        }
+
+        UiNode::Section {
+            title,
+            description,
+            children,
+        } => {
+            let group = adw::PreferencesGroup::new();
+            group.set_title(&glib::markup_escape_text(title));
+            if let Some(desc) = description.as_deref().filter(|s| !s.trim().is_empty()) {
+                group.set_description(Some(&glib::markup_escape_text(desc)));
+            }
+            let inner = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            for (i, ch) in children.iter().enumerate() {
+                let ckey = format!("{path_key}::sec[{i}]");
+                inner.append(&render_ui_node(ch, slug, &ckey, state));
+            }
+            group.add(&inner);
+            group.upcast()
+        }
+
+        UiNode::Columns { columns, children } => {
+            let max_cols = columns.unwrap_or_else(|| children.len().clamp(1, 3) as u32).max(1);
+            let flow = gtk4::FlowBox::builder()
+                .selection_mode(gtk4::SelectionMode::None)
+                .max_children_per_line(max_cols)
+                .min_children_per_line(1)
+                .column_spacing(12)
+                .row_spacing(12)
+                .homogeneous(false)
+                .hexpand(true)
+                .build();
+            for (i, ch) in children.iter().enumerate() {
+                let ckey = format!("{path_key}::col[{i}]");
+                let w = render_ui_node(ch, slug, &ckey, state);
+                w.set_hexpand(true);
+                let fchild = gtk4::FlowBoxChild::builder()
+                    .focusable(false)
+                    .hexpand(true)
+                    .valign(gtk4::Align::Fill)
+                    .child(&w)
+                    .build();
+                flow.append(&fchild);
+            }
+            flow.upcast()
+        }
+
+        UiNode::Prose {
+            title,
+            body,
+            bullets,
+            tone,
+        } => {
+            let card = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+            card.add_css_class("card");
+            card.add_css_class("panorama-block-card");
+            if let Some(t) = tone {
+                match t {
+                    Tone::Info => card.add_css_class("prose-info"),
+                    Tone::Success => card.add_css_class("prose-success"),
+                    Tone::Warning => card.add_css_class("prose-warning"),
+                    Tone::Danger => card.add_css_class("prose-danger"),
+                    Tone::Neutral => {}
+                }
+            }
+
+            if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+                let hdr = gtk4::Label::new(Some(t));
+                hdr.add_css_class("heading");
+                hdr.set_xalign(0.0);
+                hdr.set_wrap(true);
+                hdr.set_wrap_mode(pango::WrapMode::WordChar);
+                card.append(&hdr);
+            }
+
+            append_rich_prose_body(&card, body);
+
+            for b in bullets {
+                card.append(&build_plain_bullet(b));
+            }
+            card.upcast()
+        }
+
+        UiNode::Alert {
+            level,
+            title,
+            message,
+        } => {
+            let banner = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+            banner.add_css_class("card");
+            banner.add_css_class("panorama-block-card");
+            banner.add_css_class(level.css_class());
+
+            let icon = gtk4::Image::from_icon_name(level.icon_name());
+            icon.set_pixel_size(22);
+            icon.set_valign(gtk4::Align::Start);
+            icon.set_margin_top(2);
+            banner.append(&icon);
+
+            let col = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            col.set_hexpand(true);
+            if !title.trim().is_empty() {
+                let t_lbl = gtk4::Label::new(Some(title));
+                t_lbl.add_css_class("heading");
+                t_lbl.set_xalign(0.0);
+                t_lbl.set_wrap(true);
+                t_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                col.append(&t_lbl);
+            }
+            if !message.trim().is_empty() {
+                let m_lbl = gtk4::Label::new(None);
+                m_lbl.set_markup(&inline_rich_markup(message));
+                m_lbl.set_xalign(0.0);
+                m_lbl.set_wrap(true);
+                m_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                m_lbl.set_selectable(true);
+                col.append(&m_lbl);
+            }
+            banner.append(&col);
+            banner.upcast()
+        }
+
+        UiNode::KpiGrid { items } => {
+            let max_c = items.len().clamp(1, 4) as u32;
+            let flow = gtk4::FlowBox::builder()
+                .selection_mode(gtk4::SelectionMode::None)
+                .max_children_per_line(max_c)
+                .min_children_per_line(1)
+                .column_spacing(10)
+                .row_spacing(10)
+                .homogeneous(false)
+                .hexpand(true)
+                .build();
+
+            for item in items {
+                let tile = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+                tile.add_css_class("card");
+                tile.add_css_class("kpi-card");
+                tile.add_css_class(item.status.css_class());
+                tile.set_hexpand(true);
+
+                let l_lbl = gtk4::Label::new(Some(&item.label));
+                l_lbl.add_css_class("caption-heading");
+                l_lbl.add_css_class("dim-label");
+                l_lbl.set_xalign(0.0);
+                l_lbl.set_wrap(true);
+                l_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                tile.append(&l_lbl);
+
+                let v_lbl = gtk4::Label::new(Some(&item.value));
+                v_lbl.add_css_class("title-3");
+                v_lbl.set_xalign(0.0);
+                v_lbl.set_wrap(true);
+                v_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                v_lbl.set_selectable(true);
+                tile.append(&v_lbl);
+
+                if !item.sublabel.trim().is_empty() {
+                    let s_lbl = gtk4::Label::new(Some(&item.sublabel));
+                    s_lbl.add_css_class("caption");
+                    s_lbl.add_css_class("dim-label");
+                    s_lbl.set_xalign(0.0);
+                    s_lbl.set_wrap(true);
+                    s_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                    tile.append(&s_lbl);
+                }
+
+                let fchild = gtk4::FlowBoxChild::builder()
+                    .focusable(false)
+                    .hexpand(true)
+                    .valign(gtk4::Align::Fill)
+                    .child(&tile)
+                    .build();
+                flow.append(&fchild);
+            }
+            flow.upcast()
+        }
+
+        UiNode::ProgressList { title, items } => {
+            let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            card.add_css_class("card");
+            card.add_css_class("panorama-block-card");
+
+            if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+                let hdr = gtk4::Label::new(Some(t));
+                hdr.add_css_class("heading");
+                hdr.set_xalign(0.0);
+                hdr.set_wrap(true);
+                hdr.set_wrap_mode(pango::WrapMode::WordChar);
+                card.append(&hdr);
+            }
+
+            for (idx, it) in items.iter().enumerate() {
+                if idx > 0 {
+                    card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+                }
+                let item_box = gtk4::Box::new(gtk4::Orientation::Vertical, 5);
+                let row_top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let name_lbl = gtk4::Label::new(Some(&it.label));
+                name_lbl.add_css_class("heading");
+                name_lbl.set_xalign(0.0);
+                name_lbl.set_hexpand(true);
+                name_lbl.set_wrap(true);
+                name_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                row_top.append(&name_lbl);
+
+                let pct_lbl = gtk4::Label::new(Some(&format!("{:.1}%", it.percent)));
+                pct_lbl.add_css_class("mini-pill");
+                pct_lbl.add_css_class(match it.status {
+                    KpiStatus::Ok => "pill-pass",
+                    KpiStatus::Warn => "pill-bloc",
+                    KpiStatus::Err => "pill-fail",
+                    KpiStatus::Neutral => "pill-run",
+                });
+                row_top.append(&pct_lbl);
+                item_box.append(&row_top);
+
+                let bar = gtk4::ProgressBar::new();
+                bar.set_fraction((it.percent / 100.0).clamp(0.0, 1.0));
+                bar.add_css_class(match it.status {
+                    KpiStatus::Ok => "bar-ok",
+                    KpiStatus::Warn => "bar-warn",
+                    KpiStatus::Err => "bar-err",
+                    KpiStatus::Neutral => "panorama-linear-bar",
+                });
+                item_box.append(&bar);
+
+                if !it.detail.trim().is_empty() {
+                    let det = gtk4::Label::new(None);
+                    det.set_markup(&inline_rich_markup(&it.detail));
+                    det.add_css_class("caption");
+                    det.add_css_class("dim-label");
+                    det.set_xalign(0.0);
+                    det.set_wrap(true);
+                    det.set_wrap_mode(pango::WrapMode::WordChar);
+                    det.set_selectable(true);
+                    item_box.append(&det);
+                }
+                card.append(&item_box);
+            }
+            card.upcast()
+        }
+
+        UiNode::Expander {
+            title,
+            subtitle,
+            badge,
+            status,
+            expanded,
+            children,
+        } => {
+            let list = gtk4::ListBox::new();
+            list.set_selection_mode(gtk4::SelectionMode::None);
+            list.add_css_class("boxed-list");
+
+            let exp_key = format!("{path_key}::exp::{title}");
+            let init_expanded = state
+                .expanded_rows
+                .borrow()
+                .get(&exp_key)
+                .copied()
+                .unwrap_or(*expanded);
+
+            let exp_row = adw::ExpanderRow::builder()
+                .title(glib::markup_escape_text(title))
+                .subtitle(glib::markup_escape_text(subtitle))
+                .expanded(init_expanded)
+                .enable_expansion(true)
+                .build();
+
+            if let Some(b_txt) = badge.as_deref().filter(|s| !s.trim().is_empty()) {
+                let b_lbl = gtk4::Label::new(Some(b_txt));
+                b_lbl.set_valign(gtk4::Align::Center);
+                b_lbl.add_css_class("mini-pill");
+                b_lbl.add_css_class(match status.unwrap_or(KpiStatus::Neutral) {
+                    KpiStatus::Ok => "pill-pass",
+                    KpiStatus::Warn => "pill-bloc",
+                    KpiStatus::Err => "pill-fail",
+                    KpiStatus::Neutral => "pill-run",
+                });
+                exp_row.add_suffix(&b_lbl);
+            }
+
+            let exp_map = state.expanded_rows.clone();
+            let exp_key_notify = exp_key.clone();
+            exp_row.connect_expanded_notify(move |r| {
+                exp_map
+                    .borrow_mut()
+                    .insert(exp_key_notify.clone(), r.is_expanded());
+            });
+
+            if !children.is_empty() {
+                let nested_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                nested_box.set_margin_top(12);
+                nested_box.set_margin_bottom(12);
+                nested_box.set_margin_start(12);
+                nested_box.set_margin_end(12);
+
+                for (i, ch) in children.iter().enumerate() {
+                    let ckey = format!("{path_key}::expchild[{i}]");
+                    nested_box.append(&render_ui_node(ch, slug, &ckey, state));
+                }
+
+                let holder_row = gtk4::ListBoxRow::builder()
+                    .activatable(false)
+                    .selectable(false)
+                    .focusable(false)
+                    .child(&nested_box)
+                    .build();
+                exp_row.add_row(&holder_row);
+            }
+
+            list.append(&exp_row);
+            list.upcast()
+        }
+
+        UiNode::Matrix {
+            title,
+            subtitle,
+            columns,
+            cells,
+        } => build_matrix_widget(title.as_deref(), subtitle.as_deref(), *columns, cells),
+
+        UiNode::FlowGraph {
+            title,
+            subtitle,
+            nodes,
+            edges,
+        } => build_flow_graph_widget(title.as_deref(), subtitle.as_deref(), nodes, edges),
+
+        UiNode::Table {
+            title,
+            columns,
+            rows,
+        } => build_table_widget(title.as_deref(), columns, rows),
+
+        UiNode::Timeline { title, items } => build_timeline_widget(title.as_deref(), items),
+    }
+}
+
+fn build_table_widget(
+    title: Option<&str>,
+    columns: &[String],
+    rows: &[Vec<String>],
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+
+    if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        let hdr = gtk4::Label::new(Some(t));
+        hdr.add_css_class("heading");
+        hdr.set_xalign(0.0);
+        hdr.set_wrap(true);
+        hdr.set_wrap_mode(pango::WrapMode::WordChar);
+        card.append(&hdr);
+    }
+
+    let grid = gtk4::Grid::builder()
+        .column_spacing(14)
+        .row_spacing(8)
+        .hexpand(true)
+        .build();
+
+    let ncols = columns.len().max(1) as i32;
+    for (col_idx, col_title) in columns.iter().enumerate() {
+        let lbl = gtk4::Label::new(Some(col_title));
+        lbl.add_css_class("caption-heading");
+        lbl.add_css_class("table-header-cell");
+        lbl.set_xalign(0.0);
+        lbl.set_hexpand(true);
+        lbl.set_wrap(true);
+        lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        grid.attach(&lbl, col_idx as i32, 0, 1, 1);
+    }
+
+    let sep_head = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    grid.attach(&sep_head, 0, 1, ncols, 1);
+
+    for (r_idx, row) in rows.iter().enumerate() {
+        let grid_row = 2 + (r_idx as i32) * 2;
+        for (c_idx, cell_text) in row.iter().enumerate() {
+            let cell_lbl = gtk4::Label::new(None);
+            cell_lbl.set_markup(&inline_rich_markup(cell_text));
+            cell_lbl.set_xalign(0.0);
+            cell_lbl.set_valign(gtk4::Align::Start);
+            cell_lbl.set_hexpand(c_idx + 1 == columns.len() || columns.len() <= 3);
+            cell_lbl.set_wrap(true);
+            cell_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+            cell_lbl.set_selectable(true);
+            if c_idx == 0 {
+                cell_lbl.add_css_class("table-first-col");
+            }
+            grid.attach(&cell_lbl, c_idx as i32, grid_row, 1, 1);
+        }
+        if r_idx + 1 < rows.len() {
+            let row_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+            row_sep.add_css_class("spacer");
+            grid.attach(&row_sep, 0, grid_row + 1, ncols, 1);
+        }
+    }
+
+    card.append(&grid);
+    card.upcast()
+}
+
+fn build_timeline_widget(
+    title: Option<&str>,
+    items: &[crate::model::TimelineItem],
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+
+    if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        let hdr = gtk4::Label::new(Some(t));
+        hdr.add_css_class("heading");
+        hdr.set_xalign(0.0);
+        hdr.set_wrap(true);
+        hdr.set_wrap_mode(pango::WrapMode::WordChar);
+        card.append(&hdr);
+    }
+
+    let list_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let total = items.len();
+
+    for (idx, item) in items.iter().enumerate() {
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+
+        // Coluna vetorial Cairo com ponto + linha conectora vertical
+        let state = item.state;
+        let is_last = idx + 1 == total;
+        let rail = gtk4::DrawingArea::builder()
+            .content_width(22)
+            .content_height(46)
+            .vexpand(true)
+            .build();
+        let style_mgr = adw::StyleManager::default();
+        style_mgr.connect_dark_notify(glib::clone!(
+            #[weak]
+            rail,
+            move |_| {
+                rail.queue_draw();
+            }
+        ));
+        rail.set_draw_func(move |_, cr, w, h| {
+            let dark = adw::StyleManager::default().is_dark();
+            let cx = (w as f64) * 0.5;
+            let (sr, sg, sb) = state.rgb(dark);
+
+            if !is_last {
+                if dark {
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
+                } else {
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.14);
+                }
+                cr.set_line_width(2.0);
+                cr.move_to(cx, 14.0);
+                cr.line_to(cx, h as f64);
+                let _ = cr.stroke();
+            }
+
+            cr.set_source_rgba(sr, sg, sb, 0.24);
+            cr.arc(cx, 12.0, 8.0, 0.0, TAU);
+            let _ = cr.fill();
+
+            cr.set_source_rgb(sr, sg, sb);
+            cr.arc(cx, 12.0, 4.5, 0.0, TAU);
+            let _ = cr.fill();
+        });
+        row.append(&rail);
+
+        let body_col = gtk4::Box::new(gtk4::Orientation::Vertical, 3);
+        body_col.set_hexpand(true);
+        body_col.set_margin_bottom(if is_last { 2 } else { 12 });
+
+        let head_line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let ts_lbl = gtk4::Label::new(Some(&item.timestamp));
+        ts_lbl.add_css_class("caption");
+        ts_lbl.add_css_class("monospace");
+        ts_lbl.add_css_class("mini-pill");
+        ts_lbl.add_css_class("pill-pend");
+        head_line.append(&ts_lbl);
+
+        let st_lbl = gtk4::Label::new(Some(item.state.short_tag()));
+        st_lbl.add_css_class("mini-pill");
+        st_lbl.add_css_class(match item.state {
+            crate::model::CellState::Pass => "pill-pass",
+            crate::model::CellState::Running => "pill-run",
+            crate::model::CellState::Fail => "pill-fail",
+            crate::model::CellState::Blocked => "pill-bloc",
+            crate::model::CellState::Pending => "pill-pend",
+            crate::model::CellState::Reserved => "pill-resv",
+        });
+        head_line.append(&st_lbl);
+
+        let t_lbl = gtk4::Label::new(Some(&item.title));
+        t_lbl.add_css_class("heading");
+        t_lbl.set_xalign(0.0);
+        t_lbl.set_hexpand(true);
+        t_lbl.set_wrap(true);
+        t_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        head_line.append(&t_lbl);
+        body_col.append(&head_line);
+
+        if !item.detail.trim().is_empty() {
+            let d_lbl = gtk4::Label::new(None);
+            d_lbl.set_markup(&inline_rich_markup(&item.detail));
+            d_lbl.set_xalign(0.0);
+            d_lbl.set_wrap(true);
+            d_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+            d_lbl.add_css_class("dim-label");
+            d_lbl.set_selectable(true);
+            body_col.append(&d_lbl);
+        }
+
+        row.append(&body_col);
+        list_box.append(&row);
+    }
+
+    card.append(&list_box);
+    card.upcast()
+}
+
+fn append_rich_prose_body(container: &gtk4::Box, body: &str) {
+    if body.trim().is_empty() {
+        return;
+    }
+    let mut para_buf = Vec::<&str>::new();
+    let flush_para = |buf: &mut Vec<&str>, target: &gtk4::Box| {
+        if buf.is_empty() {
+            return;
+        }
+        let joined = buf.join(" ");
+        let lbl = gtk4::Label::new(None);
+        lbl.set_markup(&inline_rich_markup(&joined));
+        lbl.set_xalign(0.0);
+        lbl.set_wrap(true);
+        lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        lbl.set_selectable(true);
+        target.append(&lbl);
+        buf.clear();
+    };
+
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            flush_para(&mut para_buf, container);
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("• "))
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            flush_para(&mut para_buf, container);
+            container.append(&build_plain_bullet(rest));
+        } else {
+            para_buf.push(trimmed);
+        }
+    }
+    flush_para(&mut para_buf, container);
+}
+
+fn build_plain_bullet(text: &str) -> gtk4::Widget {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let dot = gtk4::Label::new(Some("•"));
+    dot.add_css_class("heading");
+    dot.add_css_class("accent");
+    dot.set_valign(gtk4::Align::Start);
+
+    let lbl = gtk4::Label::new(None);
+    lbl.set_markup(&inline_rich_markup(text));
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    lbl.set_wrap(true);
+    lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    lbl.set_selectable(true);
+
+    row.append(&dot);
+    row.append(&lbl);
+    row.upcast()
+}
+
+/// Converte destaques leves (`` `codigo` `` e `**negrito**`) em Pango Markup escapado com segurança.
+pub fn inline_rich_markup(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 16);
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            if let Some(end_rel) = chars[i + 1..].iter().position(|&c| c == '`') {
+                let end = i + 1 + end_rel;
+                if end > i + 1 {
+                    let code_str: String = chars[i + 1..end].iter().collect();
+                    out.push_str("<tt>");
+                    out.push_str(&glib::markup_escape_text(&code_str));
+                    out.push_str("</tt>");
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+            let rest = &chars[i + 2..];
+            if let Some(end_rel) = rest
+                .windows(2)
+                .position(|w| w[0] == '*' && w[1] == '*')
+            {
+                if end_rel > 0 {
+                    let bold_str: String = rest[..end_rel].iter().collect();
+                    out.push_str("<b>");
+                    out.push_str(&glib::markup_escape_text(&bold_str));
+                    out.push_str("</b>");
+                    i += 2 + end_rel + 2;
+                    continue;
+                }
+            }
+        }
+        match chars[i] {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            ch => out.push(ch),
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_markup_escapes_xml_and_formats_code_and_bold() {
+        let m = inline_rich_markup("Teste **A & B** em `crates/ntm-core` <ok>");
+        assert_eq!(
+            m,
+            "Teste <b>A &amp; B</b> em <tt>crates/ntm-core</tt> &lt;ok&gt;"
+        );
+    }
+}
