@@ -1,0 +1,22 @@
+[package]
+name = "claude-panorama"
+version = "0.1.0"
+edition = "2021"
+description = "Painel nativo GNOME (GTK4/Libadwaita) e CLI para acompanhamento em tempo real de projetos do Claude"
+authors = ["sacer"]
+license = "MIT"
+
+[lib]
+name = "claude_panorama"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-panorama"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_14"] }
+libadwaita = { version = "0.7", features = ["v1_6"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
