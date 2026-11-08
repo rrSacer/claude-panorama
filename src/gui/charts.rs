@@ -1,5 +1,6 @@
 use crate::model::{
-    confidence_semantic_rgb, CellState, FlowEdge, FlowNode, HistoryPoint, MatrixCell,
+    confidence_semantic_rgb, palette_rgb, CellState, ChartBar, ChartSlice, FlowEdge, FlowNode,
+    HistoryPoint, MatrixCell,
 };
 use gtk4::cairo;
 use gtk4::gdk;
@@ -100,7 +101,7 @@ pub fn build_ring_gauge(percent: f64, kind: GaugeKind) -> gtk4::DrawingArea {
 
         // Rótulo inferior no anel
         let caption = match kind {
-            GaugeKind::Progresso => "IMPLEMENTADO",
+            GaugeKind::Progresso => "PRONTO",
             GaugeKind::Confianca => "CONFIANÇA",
         };
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
@@ -584,7 +585,7 @@ pub fn build_matrix_widget(
 
     // Painel compacto de inspeção abaixo da matriz + Popover ao clicar
     let inspector_lbl = gtk4::Label::new(Some(
-        "Inspeção: clique em uma célula acima para fixar/abrir detalhes completos.",
+        "Clique num quadrado para ver o detalhe.",
     ));
     inspector_lbl.add_css_class("caption");
     inspector_lbl.add_css_class("dim-label");
@@ -753,9 +754,9 @@ pub fn build_flow_graph_widget(
         .unwrap_or(1)
         .max(1);
 
-    let node_w = 198.0_f64;
+    let node_w = 176.0_f64;
     let node_h = 62.0_f64;
-    let col_gap = 74.0_f64;
+    let col_gap = 64.0_f64;
     let row_gap = 20.0_f64;
     let pad_x = 18.0_f64;
     let pad_y = 18.0_f64;
@@ -1092,11 +1093,11 @@ pub fn build_flow_graph_widget(
             .find(|(_, r)| r.contains(cx, cy));
         if let Some((idx, rect)) = hit {
             let n = &nodes_c[idx];
-            pop_title.set_text(&format!("{} ({})", n.label, n.id));
+            pop_title.set_text(&n.label);
             let meta = if n.sublabel.is_empty() {
-                format!("Estágio {} · {}", n.col, n.state.label_pt())
+                n.state.label_pt().to_string()
             } else {
-                format!("Estágio {} · {} · {}", n.col, n.state.label_pt(), n.sublabel)
+                format!("{} · {}", n.state.label_pt(), n.sublabel)
             };
             pop_state.set_text(&meta);
             pop_body.set_text(if n.detail.is_empty() {
@@ -1200,12 +1201,12 @@ fn build_state_summary_pills(states: impl Iterator<Item = CellState>) -> gtk4::B
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     row.set_valign(gtk4::Align::Start);
     for (count, tag, css) in [
-        (pass, "PASS", "pill-pass"),
-        (run, "RUN", "pill-run"),
-        (fail, "FAIL", "pill-fail"),
-        (bloc, "BLOC", "pill-bloc"),
-        (pend, "PEND", "pill-pend"),
-        (resv, "RESV", "pill-resv"),
+        (pass, "pronto", "pill-pass"),
+        (run, "em andamento", "pill-run"),
+        (fail, "com falha", "pill-fail"),
+        (bloc, "travado", "pill-bloc"),
+        (pend, "a fazer", "pill-pend"),
+        (resv, "reservado", "pill-resv"),
     ] {
         if count > 0 {
             let l = gtk4::Label::new(Some(&format!("{count} {tag}")));
@@ -1256,4 +1257,352 @@ fn shorten_ts(ts: &str) -> String {
     } else {
         ts.to_string()
     }
+}
+
+
+/// Cor de uma fatia/barra: `color` explícito da paleta GNOME, senão a cor semântica do `state`.
+pub fn series_rgb(color: Option<&str>, state: CellState, dark: bool) -> (f64, f64, f64) {
+    color.and_then(palette_rgb).unwrap_or_else(|| state.rgb(dark))
+}
+
+fn redraw_on_theme_change(area: &gtk4::DrawingArea) {
+    adw::StyleManager::default().connect_dark_notify(glib::clone!(
+        #[weak]
+        area,
+        move |_| area.queue_draw()
+    ));
+}
+
+fn block_header(card: &gtk4::Box, title: Option<&str>, subtitle: Option<&str>) {
+    if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        let l = gtk4::Label::new(Some(t));
+        l.add_css_class("heading");
+        l.set_xalign(0.0);
+        l.set_wrap(true);
+        l.set_wrap_mode(pango::WrapMode::WordChar);
+        card.append(&l);
+    }
+    if let Some(st) = subtitle.filter(|s| !s.trim().is_empty()) {
+        let l = gtk4::Label::new(Some(st));
+        l.add_css_class("caption");
+        l.add_css_class("dim-label");
+        l.set_xalign(0.0);
+        l.set_wrap(true);
+        l.set_wrap_mode(pango::WrapMode::WordChar);
+        card.append(&l);
+    }
+}
+
+fn color_swatch(rgb_fn: impl Fn(bool) -> (f64, f64, f64) + 'static) -> gtk4::DrawingArea {
+    let sw = gtk4::DrawingArea::builder()
+        .content_width(12)
+        .content_height(12)
+        .valign(gtk4::Align::Center)
+        .build();
+    redraw_on_theme_change(&sw);
+    sw.set_draw_func(move |_, cr, w, h| {
+        let (r, g, b) = rgb_fn(adw::StyleManager::default().is_dark());
+        cr.set_source_rgb(r, g, b);
+        rounded_rect(cr, 0.0, 0.0, w as f64, h as f64, 3.0);
+        let _ = cr.fill();
+    });
+    sw
+}
+
+fn format_number(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        let raw = format!("{}", v.round() as i64);
+        // Separador de milhar pt-BR
+        let (sign, digits) = raw.strip_prefix('-').map_or(("", raw.as_str()), |d| ("-", d));
+        let mut out = String::new();
+        for (i, ch) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push('.');
+            }
+            out.push(ch);
+        }
+        format!("{sign}{out}")
+    } else {
+        format!("{v:.1}").replace('.', ",")
+    }
+}
+
+/// Gráfico de rosca: mostra como um total se divide em partes.
+pub fn build_donut_widget(
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    center_value: Option<&str>,
+    center_label: Option<&str>,
+    slices: &[ChartSlice],
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+    block_header(&card, title, subtitle);
+
+    let total: f64 = slices.iter().map(|s| s.value).sum();
+    let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 18);
+
+    let area = gtk4::DrawingArea::builder()
+        .content_width(170)
+        .content_height(170)
+        .valign(gtk4::Align::Center)
+        .build();
+    redraw_on_theme_change(&area);
+    let data: Vec<(f64, CellState, Option<String>)> = slices
+        .iter()
+        .map(|s| (s.value, s.state, s.color.clone()))
+        .collect();
+    let center_value = center_value
+        .map(str::to_string)
+        .unwrap_or_else(|| format_number(total));
+    let center_label = center_label.unwrap_or("total").to_string();
+    area.set_draw_func(move |_, cr, w, h| {
+        let dark = adw::StyleManager::default().is_dark();
+        let (cx, cy) = (w as f64 * 0.5, h as f64 * 0.5);
+        let thickness = 22.0;
+        let radius = (w.min(h) as f64) * 0.5 - thickness * 0.5 - 2.0;
+        let gap = if data.iter().filter(|d| d.0 > 0.0).count() > 1 { 0.025 } else { 0.0 };
+        let mut angle = -FRAC_PI_2;
+        cr.set_line_width(thickness);
+        for (value, state, color) in &data {
+            if *value <= 0.0 || total <= 0.0 {
+                continue;
+            }
+            let sweep = TAU * value / total;
+            let (r, g, b) = series_rgb(color.as_deref(), *state, dark);
+            cr.set_source_rgb(r, g, b);
+            let start = angle + gap * 0.5;
+            let end = (angle + sweep - gap * 0.5).max(start + 0.001);
+            cr.arc(cx, cy, radius, start, end);
+            let _ = cr.stroke();
+            angle += sweep;
+        }
+        let fg = if dark { (1.0, 1.0, 1.0) } else { (0.10, 0.10, 0.12) };
+        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        cr.set_font_size(22.0);
+        cr.set_source_rgba(fg.0, fg.1, fg.2, 0.95);
+        let txt = fit_text_width(cr, &center_value, radius * 1.4);
+        if let Ok(ext) = cr.text_extents(&txt) {
+            cr.move_to(cx - ext.width() * 0.5 - ext.x_bearing(), cy + 4.0);
+            let _ = cr.show_text(&txt);
+        }
+        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.set_font_size(11.0);
+        cr.set_source_rgba(fg.0, fg.1, fg.2, 0.6);
+        let lbl = fit_text_width(cr, &center_label, radius * 1.4);
+        if let Ok(ext) = cr.text_extents(&lbl) {
+            cr.move_to(cx - ext.width() * 0.5 - ext.x_bearing(), cy + 21.0);
+            let _ = cr.show_text(&lbl);
+        }
+    });
+    body.append(&area);
+
+    let legend = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    legend.set_hexpand(true);
+    legend.set_valign(gtk4::Align::Center);
+    for s in slices {
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let (color, state) = (s.color.clone(), s.state);
+        row.append(&color_swatch(move |dark| series_rgb(color.as_deref(), state, dark)));
+
+        let text_col = gtk4::Box::new(gtk4::Orientation::Vertical, 1);
+        text_col.set_hexpand(true);
+        let name = gtk4::Label::new(Some(&s.label));
+        name.set_xalign(0.0);
+        name.set_wrap(true);
+        name.set_wrap_mode(pango::WrapMode::WordChar);
+        text_col.append(&name);
+        if !s.detail.trim().is_empty() {
+            let det = gtk4::Label::new(Some(&s.detail));
+            det.add_css_class("caption");
+            det.add_css_class("dim-label");
+            det.set_xalign(0.0);
+            det.set_wrap(true);
+            det.set_wrap_mode(pango::WrapMode::WordChar);
+            text_col.append(&det);
+        }
+        row.append(&text_col);
+
+        let pct = if total > 0.0 { s.value / total * 100.0 } else { 0.0 };
+        let val = gtk4::Label::new(Some(&format!(
+            "{} · {}%",
+            format_number(s.value),
+            format_number((pct * 10.0).round() / 10.0)
+        )));
+        val.add_css_class("caption-heading");
+        val.add_css_class("numeric");
+        val.set_valign(gtk4::Align::Start);
+        row.append(&val);
+        legend.append(&row);
+    }
+    body.append(&legend);
+    card.append(&body);
+    card.upcast()
+}
+
+/// Barras horizontais com valores absolutos (contagens, horas, arquivos...).
+pub fn build_bar_chart_widget(
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    unit: Option<&str>,
+    max: Option<f64>,
+    bars: &[ChartBar],
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+    block_header(&card, title, subtitle);
+
+    let scale_max = max
+        .unwrap_or_else(|| bars.iter().map(|b| b.value).fold(0.0, f64::max))
+        .max(f64::MIN_POSITIVE);
+
+    let grid = gtk4::Grid::builder()
+        .row_spacing(4)
+        .column_spacing(12)
+        .hexpand(true)
+        .build();
+    let mut row_idx = 0;
+    for b in bars {
+        let name = gtk4::Label::new(Some(&b.label));
+        name.set_xalign(0.0);
+        name.set_wrap(true);
+        name.set_wrap_mode(pango::WrapMode::WordChar);
+        name.set_max_width_chars(28);
+        name.set_width_chars(14);
+        grid.attach(&name, 0, row_idx, 1, 1);
+
+        let area = gtk4::DrawingArea::builder()
+            .content_height(16)
+            .hexpand(true)
+            .valign(gtk4::Align::Center)
+            .build();
+        redraw_on_theme_change(&area);
+        let frac = (b.value / scale_max).clamp(0.0, 1.0);
+        let (color, state) = (b.color.clone(), b.state);
+        area.set_draw_func(move |_, cr, w, h| {
+            let dark = adw::StyleManager::default().is_dark();
+            let (w, h) = (w as f64, h as f64);
+            if dark {
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+            } else {
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.07);
+            }
+            rounded_rect(cr, 0.0, 0.0, w, h, h * 0.5);
+            let _ = cr.fill();
+            if frac > 0.0 {
+                let (r, g, bl) = series_rgb(color.as_deref(), state, dark);
+                cr.set_source_rgb(r, g, bl);
+                rounded_rect(cr, 0.0, 0.0, (w * frac).max(h), h, h * 0.5);
+                let _ = cr.fill();
+            }
+        });
+        if !b.detail.trim().is_empty() {
+            area.set_tooltip_text(Some(&b.detail));
+            name.set_tooltip_text(Some(&b.detail));
+        }
+        grid.attach(&area, 1, row_idx, 1, 1);
+
+        let value_txt = b.value_label.clone().unwrap_or_else(|| match unit {
+            Some(u) if !u.is_empty() => format!("{} {u}", format_number(b.value)),
+            _ => format_number(b.value),
+        });
+        let val = gtk4::Label::new(Some(&value_txt));
+        val.add_css_class("caption-heading");
+        val.add_css_class("numeric");
+        val.set_xalign(1.0);
+        grid.attach(&val, 2, row_idx, 1, 1);
+        row_idx += 1;
+
+        if !b.detail.trim().is_empty() {
+            let det = gtk4::Label::new(Some(&b.detail));
+            det.add_css_class("caption");
+            det.add_css_class("dim-label");
+            det.set_xalign(0.0);
+            det.set_wrap(true);
+            det.set_wrap_mode(pango::WrapMode::WordChar);
+            det.set_margin_bottom(6);
+            grid.attach(&det, 0, row_idx, 3, 1);
+            row_idx += 1;
+        }
+    }
+    card.append(&grid);
+    card.upcast()
+}
+
+/// Círculo numerado de uma etapa com meias-linhas de conexão às etapas vizinhas.
+pub fn build_step_marker(
+    number: usize,
+    state: CellState,
+    has_prev: bool,
+    has_next: bool,
+    prev_done: bool,
+) -> gtk4::DrawingArea {
+    let area = gtk4::DrawingArea::builder()
+        .content_height(40)
+        .content_width(40)
+        .hexpand(true)
+        .build();
+    redraw_on_theme_change(&area);
+    area.set_draw_func(move |_, cr, w, h| {
+        let dark = adw::StyleManager::default().is_dark();
+        let (w, h) = (w as f64, h as f64);
+        let (cx, cy, r) = (w * 0.5, h * 0.5, 15.0);
+        let muted = if dark { (1.0, 1.0, 1.0, 0.16) } else { (0.0, 0.0, 0.0, 0.14) };
+        let done_rgb = CellState::Pass.rgb(dark);
+        cr.set_line_width(3.0);
+        if has_prev {
+            if prev_done {
+                cr.set_source_rgb(done_rgb.0, done_rgb.1, done_rgb.2);
+            } else {
+                cr.set_source_rgba(muted.0, muted.1, muted.2, muted.3);
+            }
+            cr.move_to(0.0, cy);
+            cr.line_to(cx - r, cy);
+            let _ = cr.stroke();
+        }
+        if has_next {
+            if state == CellState::Pass {
+                cr.set_source_rgb(done_rgb.0, done_rgb.1, done_rgb.2);
+            } else {
+                cr.set_source_rgba(muted.0, muted.1, muted.2, muted.3);
+            }
+            cr.move_to(cx + r, cy);
+            cr.line_to(w, cy);
+            let _ = cr.stroke();
+        }
+        let (sr, sg, sb) = state.rgb(dark);
+        let filled = matches!(state, CellState::Pass | CellState::Running | CellState::Fail | CellState::Blocked);
+        cr.arc(cx, cy, r, 0.0, TAU);
+        if filled {
+            cr.set_source_rgb(sr, sg, sb);
+            let _ = cr.fill();
+        } else {
+            cr.set_source_rgba(sr, sg, sb, 0.15);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgb(sr, sg, sb);
+            cr.set_line_width(2.0);
+            let _ = cr.stroke();
+        }
+        if state == CellState::Running {
+            cr.set_source_rgba(sr, sg, sb, 0.35);
+            cr.set_line_width(3.0);
+            cr.arc(cx, cy, r + 4.0, 0.0, TAU);
+            let _ = cr.stroke();
+        }
+        let txt = if state == CellState::Pass { "✓".to_string() } else { number.to_string() };
+        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        cr.set_font_size(14.0);
+        if filled {
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+        } else {
+            cr.set_source_rgb(sr, sg, sb);
+        }
+        if let Ok(ext) = cr.text_extents(&txt) {
+            cr.move_to(cx - ext.width() * 0.5 - ext.x_bearing(), cy - ext.height() * 0.5 - ext.y_bearing());
+            let _ = cr.show_text(&txt);
+        }
+    });
+    area
 }

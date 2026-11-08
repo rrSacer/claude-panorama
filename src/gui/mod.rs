@@ -160,6 +160,26 @@ const CUSTOM_CSS: &str = r#"
 .bar-err trough progress {
     background-color: #e01b24;
 }
+
+.icon-card {
+    padding: 16px;
+}
+
+.icon-badge {
+    padding: 10px;
+    border-radius: 12px;
+}
+
+.tone-info { background-color: alpha(#3584e4, 0.16); color: #3584e4; }
+.tone-success { background-color: alpha(#2ec27e, 0.16); color: #26a269; }
+.tone-warning { background-color: alpha(#e5a50a, 0.18); color: #c88800; }
+.tone-danger { background-color: alpha(#e01b24, 0.16); color: #e01b24; }
+.tone-neutral { background-color: alpha(currentColor, 0.08); }
+
+.expander-icon.icon-neutral { color: #3584e4; }
+.expander-icon.icon-ok { color: #2ec27e; }
+.expander-icon.icon-warn { color: #e5a50a; }
+.expander-icon.icon-err { color: #e01b24; }
 "#;
 
 pub fn run_gui() -> i32 {

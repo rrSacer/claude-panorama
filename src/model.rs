@@ -95,7 +95,7 @@ impl AlertLevel {
     pub fn icon_name(self) -> &'static str {
         match self {
             Self::Info => "dialog-information-symbolic",
-            Self::Success => "emblem-ok-symbolic",
+            Self::Success => "object-select-symbolic",
             Self::Warning => "dialog-warning-symbolic",
             Self::Danger => "dialog-error-symbolic",
         }
@@ -155,23 +155,23 @@ pub enum CellState {
 impl CellState {
     pub fn label_pt(self) -> &'static str {
         match self {
-            Self::Pass => "Aprovado / Pronto",
-            Self::Running => "Em execução",
-            Self::Fail => "Falha / Conflito",
-            Self::Pending => "Pendente",
-            Self::Blocked => "Bloqueado",
+            Self::Pass => "Pronto",
+            Self::Running => "Em andamento",
+            Self::Fail => "Com falha",
+            Self::Pending => "A fazer",
+            Self::Blocked => "Travado",
             Self::Reserved => "Reservado",
         }
     }
 
     pub fn short_tag(self) -> &'static str {
         match self {
-            Self::Pass => "PASS",
-            Self::Running => "RUN",
-            Self::Fail => "FAIL",
-            Self::Pending => "PEND",
-            Self::Blocked => "BLOC",
-            Self::Reserved => "RESV",
+            Self::Pass => "PRONTO",
+            Self::Running => "EM CURSO",
+            Self::Fail => "FALHOU",
+            Self::Pending => "A FAZER",
+            Self::Blocked => "TRAVADO",
+            Self::Reserved => "RESERV.",
         }
     }
 
@@ -306,6 +306,8 @@ pub enum UiNode {
         #[serde(default)]
         subtitle: String,
         #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
         badge: Option<String>,
         #[serde(default)]
         status: Option<KpiStatus>,
@@ -347,6 +349,109 @@ pub enum UiNode {
         #[serde(default, alias = "events")]
         items: Vec<TimelineItem>,
     },
+    Donut {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        subtitle: Option<String>,
+        #[serde(default)]
+        center_value: Option<String>,
+        #[serde(default)]
+        center_label: Option<String>,
+        #[serde(default)]
+        slices: Vec<ChartSlice>,
+    },
+    BarChart {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        subtitle: Option<String>,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default)]
+        max: Option<f64>,
+        #[serde(default)]
+        bars: Vec<ChartBar>,
+    },
+    Steps {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        subtitle: Option<String>,
+        #[serde(default)]
+        first_number: Option<usize>,
+        #[serde(default)]
+        steps: Vec<StepItem>,
+    },
+    Cards {
+        #[serde(default)]
+        columns: Option<u32>,
+        #[serde(default)]
+        items: Vec<CardItem>,
+    },
+    Glossary {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        items: Vec<GlossaryItem>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChartSlice {
+    pub label: String,
+    pub value: f64,
+    #[serde(default)]
+    pub state: CellState,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChartBar {
+    pub label: String,
+    pub value: f64,
+    #[serde(default)]
+    pub value_label: Option<String>,
+    #[serde(default)]
+    pub state: CellState,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StepItem {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub state: CellState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CardItem {
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub tone: Option<Tone>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GlossaryItem {
+    pub term: String,
+    pub meaning: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -489,12 +594,17 @@ fn validate_ui_node_unknown_keys(
         "kpi_grid" => &["type", "items"],
         "progress_list" => &["type", "title", "items"],
         "expander" => &[
-            "type", "title", "subtitle", "badge", "status", "expanded", "children",
+            "type", "title", "subtitle", "icon", "badge", "status", "expanded", "children",
         ],
         "matrix" => &["type", "title", "subtitle", "columns", "cells"],
         "flow_graph" => &["type", "title", "subtitle", "nodes", "edges"],
         "table" => &["type", "title", "columns", "rows"],
         "timeline" => &["type", "title", "items", "events"],
+        "donut" => &["type", "title", "subtitle", "center_value", "center_label", "slices"],
+        "bar_chart" => &["type", "title", "subtitle", "unit", "max", "bars"],
+        "steps" => &["type", "title", "subtitle", "first_number", "steps"],
+        "cards" => &["type", "columns", "items"],
+        "glossary" => &["type", "title", "items"],
         _ => return Ok(()),
     };
     for key in obj.keys() {
@@ -827,8 +937,109 @@ fn validate_ui_node(node: &UiNode, path: &str) -> Result<(), ValidationError> {
                 });
             }
         }
+        UiNode::Donut { slices, .. } => {
+            require_non_empty(path, "donut", "slices", slices.len())?;
+            for (i, s) in slices.iter().enumerate() {
+                validate_non_negative(&format!("{path}.slices[{i}].value"), s.value)?;
+                validate_color(&format!("{path}.slices[{i}].color"), s.color.as_deref())?;
+            }
+            if slices.iter().map(|s| s.value).sum::<f64>() <= 0.0 {
+                return Err(ValidationError {
+                    message: format!("{path} (`donut`) precisa de ao menos uma fatia com `value` > 0"),
+                    line: None,
+                    column: None,
+                });
+            }
+        }
+        UiNode::BarChart { bars, max, .. } => {
+            require_non_empty(path, "bar_chart", "bars", bars.len())?;
+            if let Some(m) = max {
+                if !m.is_finite() || *m <= 0.0 {
+                    return Err(ValidationError {
+                        message: format!("{path}.max deve ser maior que 0 (recebido: {m})"),
+                        line: None,
+                        column: None,
+                    });
+                }
+            }
+            for (i, b) in bars.iter().enumerate() {
+                validate_non_negative(&format!("{path}.bars[{i}].value"), b.value)?;
+                validate_color(&format!("{path}.bars[{i}].color"), b.color.as_deref())?;
+            }
+        }
+        UiNode::Steps { steps, .. } => {
+            require_non_empty(path, "steps", "steps", steps.len())?;
+        }
+        UiNode::Cards { items, .. } => {
+            require_non_empty(path, "cards", "items", items.len())?;
+        }
+        UiNode::Glossary { items, .. } => {
+            require_non_empty(path, "glossary", "items", items.len())?;
+        }
     }
     Ok(())
+}
+
+fn require_non_empty(path: &str, kind: &str, field: &str, len: usize) -> Result<(), ValidationError> {
+    if len == 0 {
+        return Err(ValidationError {
+            message: format!("{path} (`{kind}`) requer ao menos 1 item em `{field}`"),
+            line: None,
+            column: None,
+        });
+    }
+    Ok(())
+}
+
+fn validate_non_negative(name: &str, val: f64) -> Result<(), ValidationError> {
+    if !val.is_finite() || val < 0.0 {
+        return Err(ValidationError {
+            message: format!("`{name}` deve ser um número >= 0 (recebido: {val})"),
+            line: None,
+            column: None,
+        });
+    }
+    Ok(())
+}
+
+fn validate_color(name: &str, color: Option<&str>) -> Result<(), ValidationError> {
+    match color {
+        Some(c) if palette_rgb(c).is_none() => Err(ValidationError {
+            message: format!(
+                "`{name}` tem cor desconhecida `{c}` (aceitas: {})",
+                PALETTE_NAMES.join(", ")
+            ),
+            line: None,
+            column: None,
+        }),
+        _ => Ok(()),
+    }
+}
+
+pub const PALETTE_NAMES: &[&str] = &[
+    "blue", "teal", "green", "yellow", "orange", "red", "pink", "purple", "brown", "gray",
+];
+
+/// Paleta de destaque do GNOME (Libadwaita) para fatias e barras com `color` explícito.
+pub fn palette_rgb(name: &str) -> Option<(f64, f64, f64)> {
+    let hex = match name {
+        "blue" => 0x3584e4,
+        "teal" => 0x2190a4,
+        "green" => 0x2ec27e,
+        "yellow" => 0xe5a50a,
+        "orange" => 0xff7800,
+        "red" => 0xe01b24,
+        "pink" => 0xd56199,
+        "purple" => 0x9141ac,
+        "brown" => 0x986a44,
+        "gray" => 0x77767b,
+        _ => return None,
+    };
+    Some((
+        ((hex >> 16) & 0xff) as f64 / 255.0,
+        ((hex >> 8) & 0xff) as f64 / 255.0,
+        (hex & 0xff) as f64 / 255.0,
+    ))
 }
 
 /// Retorna a cor semântica Adwaita (R, G, B em 0..=1) para o anel de Confiança.
@@ -988,6 +1199,45 @@ mod tests {
         let raw = r#"{"title": "X", "progresso": 105.0, "confianca": 50.0}"#;
         let err = parse_and_validate_json(raw).expect_err("must reject > 100");
         assert!(err.message.contains("progresso"));
+    }
+
+    #[test]
+    fn visual_blocks_parse_and_roundtrip() {
+        let raw = r#"{
+            "title": "Visual",
+            "progresso": 10.0,
+            "confianca": 50.0,
+            "ui": [
+                { "type": "cards", "items": [{ "icon": "help-about-symbolic", "title": "O que é", "text": "Explicação", "tone": "info" }] },
+                { "type": "donut", "center_label": "itens", "slices": [
+                    { "label": "Pronto", "value": 30, "state": "pass" },
+                    { "label": "Falta", "value": 70, "color": "gray" }
+                ] },
+                { "type": "bar_chart", "unit": "testes", "bars": [{ "label": "Reator", "value": 133, "detail": "ok" }] },
+                { "type": "steps", "steps": [{ "title": "Base", "state": "pass" }, { "title": "Reatores", "description": "próxima" }] },
+                { "type": "glossary", "items": [{ "term": "Save", "meaning": "Gravar o mundo no disco" }] },
+                { "type": "expander", "title": "Detalhes", "icon": "dialog-information-symbolic", "children": [] }
+            ]
+        }"#;
+        let doc = parse_and_validate_json(raw).expect("visual blocks should parse");
+        let again = parse_and_validate_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(doc, again);
+    }
+
+    #[test]
+    fn visual_blocks_reject_bad_values() {
+        let bad_color = r#"{"title": "X", "progresso": 1.0, "confianca": 1.0,
+            "ui": [{ "type": "donut", "slices": [{ "label": "A", "value": 1, "color": "magenta" }] }]}"#;
+        assert!(parse_and_validate_json(bad_color).unwrap_err().message.contains("magenta"));
+        let zero_donut = r#"{"title": "X", "progresso": 1.0, "confianca": 1.0,
+            "ui": [{ "type": "donut", "slices": [{ "label": "A", "value": 0 }] }]}"#;
+        assert!(parse_and_validate_json(zero_donut).is_err());
+        let negative_bar = r#"{"title": "X", "progresso": 1.0, "confianca": 1.0,
+            "ui": [{ "type": "bar_chart", "bars": [{ "label": "A", "value": -2 }] }]}"#;
+        assert!(parse_and_validate_json(negative_bar).is_err());
+        let typo = r#"{"title": "X", "progresso": 1.0, "confianca": 1.0,
+            "ui": [{ "type": "steps", "passos": [] }]}"#;
+        assert!(parse_and_validate_json(typo).unwrap_err().message.contains("passos"));
     }
 
     #[test]

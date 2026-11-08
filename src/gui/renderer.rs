@@ -1,8 +1,9 @@
 use crate::gui::charts::{
-    build_flow_graph_widget, build_matrix_widget, build_ring_gauge, build_sparkline, GaugeKind,
+    build_bar_chart_widget, build_donut_widget, build_flow_graph_widget, build_matrix_widget,
+    build_ring_gauge, build_sparkline, build_step_marker, GaugeKind,
 };
 use crate::model::{
-    KpiStatus, ProjectDocument, Tone, UiNode,
+    CardItem, CellState, GlossaryItem, KpiStatus, ProjectDocument, StepItem, Tone, UiNode,
 };
 use gtk4::glib;
 use gtk4::pango;
@@ -31,7 +32,7 @@ pub fn render_project_view(doc: &ProjectDocument, state: &UiViewState) -> gtk4::
     root.append(&build_project_banner(doc));
 
     // 2. Cabeçalho Fixo Obrigatório (Progresso + Confiança)
-    root.append(&build_fixed_header_pair(doc));
+    root.append(&build_fixed_header_pair(doc, state));
 
     // 3. Área Dinâmica Livre (`ui`)
     if doc.ui.is_empty() {
@@ -134,7 +135,7 @@ fn build_project_banner(doc: &ProjectDocument) -> gtk4::Widget {
     banner.upcast()
 }
 
-fn build_fixed_header_pair(doc: &ProjectDocument) -> gtk4::Widget {
+fn build_fixed_header_pair(doc: &ProjectDocument, state: &UiViewState) -> gtk4::Widget {
     let flow = gtk4::FlowBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .max_children_per_line(2)
@@ -145,8 +146,8 @@ fn build_fixed_header_pair(doc: &ProjectDocument) -> gtk4::Widget {
         .hexpand(true)
         .build();
 
-    let prog_card = build_fixed_progresso_card(doc);
-    let conf_card = build_fixed_confianca_card(doc);
+    let prog_card = build_fixed_progresso_card(doc, state);
+    let conf_card = build_fixed_confianca_card(doc, state);
 
     let child1 = gtk4::FlowBoxChild::builder()
         .focusable(false)
@@ -166,7 +167,30 @@ fn build_fixed_header_pair(doc: &ProjectDocument) -> gtk4::Widget {
     flow.upcast()
 }
 
-fn build_fixed_progresso_card(doc: &ProjectDocument) -> gtk4::Widget {
+/// Seção recolhível do cabeçalho fixo; lembra se estava aberta entre recargas.
+fn build_header_disclosure(
+    state: &UiViewState,
+    key: String,
+    label: &str,
+    content: &gtk4::Widget,
+) -> gtk4::Widget {
+    let initial = state.expanded_rows.borrow().get(&key).copied().unwrap_or(false);
+    let lbl = gtk4::Label::new(Some(label));
+    lbl.add_css_class("caption-heading");
+    let exp = gtk4::Expander::builder()
+        .label_widget(&lbl)
+        .expanded(initial)
+        .child(content)
+        .build();
+    content.set_margin_top(6);
+    let map = state.expanded_rows.clone();
+    exp.connect_expanded_notify(move |e| {
+        map.borrow_mut().insert(key.clone(), e.is_expanded());
+    });
+    exp.upcast()
+}
+
+fn build_fixed_progresso_card(doc: &ProjectDocument, state: &UiViewState) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     card.add_css_class("card");
     card.add_css_class("fixed-metric-card");
@@ -175,7 +199,7 @@ fn build_fixed_progresso_card(doc: &ProjectDocument) -> gtk4::Widget {
 
     // Linha título + delta recente
     let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    let title = gtk4::Label::new(Some("Progresso do Escopo"));
+    let title = gtk4::Label::new(Some("Progresso"));
     title.add_css_class("title-4");
     title.set_xalign(0.0);
     title.set_hexpand(true);
@@ -226,30 +250,26 @@ fn build_fixed_progresso_card(doc: &ProjectDocument) -> gtk4::Widget {
     mid.append(&info_col);
     card.append(&mid);
 
-    card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
-
-    let calc_hdr = gtk4::Label::new(Some("Critério de cálculo do progresso:"));
-    calc_hdr.add_css_class("caption-heading");
-    calc_hdr.add_css_class("dim-label");
-    calc_hdr.set_xalign(0.0);
-    card.append(&calc_hdr);
-
-    let calc_txt = if doc.progresso_calculo.trim().is_empty() {
-        "Sem fórmula de cálculo detalhada informada neste JSON."
-    } else {
-        doc.progresso_calculo.as_str()
-    };
-    let calc_lbl = gtk4::Label::new(Some(calc_txt));
-    calc_lbl.set_xalign(0.0);
-    calc_lbl.set_wrap(true);
-    calc_lbl.set_wrap_mode(pango::WrapMode::WordChar);
-    calc_lbl.set_selectable(true);
-    card.append(&calc_lbl);
+    if !doc.progresso_calculo.trim().is_empty() {
+        card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+        let calc_lbl = gtk4::Label::new(None);
+        calc_lbl.set_markup(&inline_rich_markup(&doc.progresso_calculo));
+        calc_lbl.set_xalign(0.0);
+        calc_lbl.set_wrap(true);
+        calc_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+        calc_lbl.set_selectable(true);
+        card.append(&build_header_disclosure(
+            state,
+            format!("{}::hdr::calculo", doc.slug),
+            "Como esse número é calculado",
+            calc_lbl.upcast_ref(),
+        ));
+    }
 
     card.upcast()
 }
 
-fn build_fixed_confianca_card(doc: &ProjectDocument) -> gtk4::Widget {
+fn build_fixed_confianca_card(doc: &ProjectDocument, state: &UiViewState) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     card.add_css_class("card");
     card.add_css_class("fixed-metric-card");
@@ -257,24 +277,24 @@ fn build_fixed_confianca_card(doc: &ProjectDocument) -> gtk4::Widget {
     card.set_vexpand(true);
 
     let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    let title = gtk4::Label::new(Some("Confiança de Sucesso"));
+    let title = gtk4::Label::new(Some("Confiança"));
     title.add_css_class("title-4");
     title.set_xalign(0.0);
     title.set_hexpand(true);
     top.append(&title);
 
     let band_lbl = if doc.confianca >= 75.0 {
-        let l = gtk4::Label::new(Some("Alta (>=75%)"));
+        let l = gtk4::Label::new(Some("Alta"));
         l.add_css_class("mini-pill");
         l.add_css_class("pill-pass");
         l
     } else if doc.confianca >= 45.0 {
-        let l = gtk4::Label::new(Some("Moderada (45–74%)"));
+        let l = gtk4::Label::new(Some("Moderada"));
         l.add_css_class("mini-pill");
         l.add_css_class("pill-bloc");
         l
     } else {
-        let l = gtk4::Label::new(Some("Crítica (<45%)"));
+        let l = gtk4::Label::new(Some("Baixa"));
         l.add_css_class("mini-pill");
         l.add_css_class("pill-fail");
         l
@@ -303,42 +323,40 @@ fn build_fixed_confianca_card(doc: &ProjectDocument) -> gtk4::Widget {
         summary_col.append(&res_lbl);
     }
 
-    // Fatores que sustentam a confiança
-    if !doc.confianca_fatores.is_empty() {
-        let f_hdr = gtk4::Label::new(Some("Fatores que sustentam a confiança:"));
-        f_hdr.add_css_class("caption-heading");
-        f_hdr.add_css_class("text-ok");
-        f_hdr.set_xalign(0.0);
-        summary_col.append(&f_hdr);
-
-        for item in &doc.confianca_fatores {
-            summary_col.append(&build_icon_bullet_row(
-                "emblem-ok-symbolic",
-                "text-ok",
-                item,
-            ));
-        }
-    }
-
-    // Riscos / gargalos que reduzem a confiança
-    if !doc.confianca_riscos.is_empty() {
-        let r_hdr = gtk4::Label::new(Some("Riscos / gargalos que reduzem a confiança:"));
-        r_hdr.add_css_class("caption-heading");
-        r_hdr.add_css_class("text-warn");
-        r_hdr.set_xalign(0.0);
-        summary_col.append(&r_hdr);
-
-        for item in &doc.confianca_riscos {
-            summary_col.append(&build_icon_bullet_row(
-                "dialog-warning-symbolic",
-                "text-warn",
-                item,
-            ));
-        }
-    }
-
     mid.append(&summary_col);
     card.append(&mid);
+
+    // Fatores e riscos ficam recolhidos para o topo não pesar.
+    for (items, icon, css, label, key) in [
+        (
+            &doc.confianca_fatores,
+            "object-select-symbolic",
+            "text-ok",
+            "O que dá segurança",
+            "fatores",
+        ),
+        (
+            &doc.confianca_riscos,
+            "dialog-warning-symbolic",
+            "text-warn",
+            "O que ainda preocupa",
+            "riscos",
+        ),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        let list = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        for item in items {
+            list.append(&build_icon_bullet_row(icon, css, item));
+        }
+        card.append(&build_header_disclosure(
+            state,
+            format!("{}::hdr::{key}", doc.slug),
+            &format!("{label} ({})", items.len()),
+            list.upcast_ref(),
+        ));
+    }
 
     if !doc.history.is_empty() {
         card.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
@@ -728,6 +746,7 @@ fn render_ui_node(
         UiNode::Expander {
             title,
             subtitle,
+            icon,
             badge,
             status,
             expanded,
@@ -751,6 +770,19 @@ fn render_ui_node(
                 .expanded(init_expanded)
                 .enable_expansion(true)
                 .build();
+
+            if let Some(ic) = icon.as_deref().filter(|s| !s.trim().is_empty()) {
+                let img = gtk4::Image::from_icon_name(ic);
+                img.set_pixel_size(20);
+                img.add_css_class("expander-icon");
+                img.add_css_class(match status {
+                    Some(KpiStatus::Ok) => "icon-ok",
+                    Some(KpiStatus::Warn) => "icon-warn",
+                    Some(KpiStatus::Err) => "icon-err",
+                    _ => "icon-neutral",
+                });
+                exp_row.add_prefix(&img);
+            }
 
             if let Some(b_txt) = badge.as_deref().filter(|s| !s.trim().is_empty()) {
                 let b_lbl = gtk4::Label::new(Some(b_txt));
@@ -819,7 +851,227 @@ fn render_ui_node(
         } => build_table_widget(title.as_deref(), columns, rows),
 
         UiNode::Timeline { title, items } => build_timeline_widget(title.as_deref(), items),
+
+        UiNode::Donut {
+            title,
+            subtitle,
+            center_value,
+            center_label,
+            slices,
+        } => build_donut_widget(
+            title.as_deref(),
+            subtitle.as_deref(),
+            center_value.as_deref(),
+            center_label.as_deref(),
+            slices,
+        ),
+
+        UiNode::BarChart {
+            title,
+            subtitle,
+            unit,
+            max,
+            bars,
+        } => build_bar_chart_widget(
+            title.as_deref(),
+            subtitle.as_deref(),
+            unit.as_deref(),
+            *max,
+            bars,
+        ),
+
+        UiNode::Steps {
+            title,
+            subtitle,
+            first_number,
+            steps,
+        } => build_steps_widget(
+            title.as_deref(),
+            subtitle.as_deref(),
+            first_number.unwrap_or(1),
+            steps,
+        ),
+
+        UiNode::Cards { columns, items } => build_cards_widget(*columns, items),
+
+        UiNode::Glossary { title, items } => build_glossary_widget(title.as_deref(), items),
     }
+}
+
+fn wrapped_label(text: &str, css: &[&str]) -> gtk4::Label {
+    let l = gtk4::Label::new(None);
+    l.set_markup(&inline_rich_markup(text));
+    l.set_xalign(0.0);
+    l.set_wrap(true);
+    l.set_wrap_mode(pango::WrapMode::WordChar);
+    for c in css {
+        l.add_css_class(c);
+    }
+    l
+}
+
+fn tone_css(tone: Option<Tone>) -> &'static str {
+    match tone.unwrap_or(Tone::Info) {
+        Tone::Info => "tone-info",
+        Tone::Success => "tone-success",
+        Tone::Warning => "tone-warning",
+        Tone::Danger => "tone-danger",
+        Tone::Neutral => "tone-neutral",
+    }
+}
+
+/// Jornada em etapas: círculos numerados ligados por uma linha; clique abre a explicação.
+fn build_steps_widget(
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    first_number: usize,
+    steps: &[StepItem],
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+    if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        card.append(&wrapped_label(t, &["heading"]));
+    }
+    if let Some(st) = subtitle.filter(|s| !s.trim().is_empty()) {
+        card.append(&wrapped_label(st, &["caption", "dim-label"]));
+    }
+
+    let grid = gtk4::Grid::builder()
+        .column_homogeneous(true)
+        .row_spacing(4)
+        .hexpand(true)
+        .build();
+    let n = steps.len();
+    for (i, step) in steps.iter().enumerate() {
+        let col = i as i32;
+        let prev_done = i > 0 && steps[i - 1].state == CellState::Pass;
+        let number = first_number + i;
+        let marker = build_step_marker(number, step.state, i > 0, i + 1 < n, prev_done);
+        grid.attach(&marker, col, 0, 1, 1);
+
+        let name = gtk4::Label::new(Some(&step.title));
+        name.set_wrap(true);
+        name.set_wrap_mode(pango::WrapMode::WordChar);
+        name.set_justify(gtk4::Justification::Center);
+        name.set_max_width_chars(14);
+        name.set_margin_start(4);
+        name.set_margin_end(4);
+        name.add_css_class("caption-heading");
+        grid.attach(&name, col, 1, 1, 1);
+
+        let st = gtk4::Label::new(Some(step.state.label_pt()));
+        st.add_css_class("caption");
+        st.add_css_class("dim-label");
+        grid.attach(&st, col, 2, 1, 1);
+
+        if !step.description.trim().is_empty() {
+            let pop_lbl = wrapped_label(&step.description, &[]);
+            pop_lbl.set_max_width_chars(44);
+            pop_lbl.set_selectable(true);
+            let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+            pop_box.set_margin_top(10);
+            pop_box.set_margin_bottom(10);
+            pop_box.set_margin_start(12);
+            pop_box.set_margin_end(12);
+            pop_box.append(&wrapped_label(&format!("{number}. {}", step.title), &["heading"]));
+            pop_box.append(&wrapped_label(step.state.label_pt(), &["caption-heading", "dim-label"]));
+            pop_box.append(&pop_lbl);
+            let popover = gtk4::Popover::builder().child(&pop_box).build();
+            popover.set_parent(&marker);
+            marker.connect_destroy({
+                let popover = popover.clone();
+                move |_| popover.unparent()
+            });
+            marker.set_cursor_from_name(Some("pointer"));
+            marker.set_tooltip_text(Some("Clique para ver o que esta etapa inclui"));
+            let click = gtk4::GestureClick::new();
+            click.connect_released(move |_, _, _, _| popover.popup());
+            marker.add_controller(click);
+        }
+    }
+
+    let scroller = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_height(true)
+        .child(&grid)
+        .build();
+    grid.set_size_request((n as i32) * 96, -1);
+    card.append(&scroller);
+    card.upcast()
+}
+
+/// Cartões com ícone grande, título e texto curto.
+fn build_cards_widget(columns: Option<u32>, items: &[CardItem]) -> gtk4::Widget {
+    let max_c = columns.unwrap_or_else(|| items.len().clamp(1, 3) as u32).max(1);
+    let flow = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .max_children_per_line(max_c)
+        .min_children_per_line(1)
+        .column_spacing(12)
+        .row_spacing(12)
+        .homogeneous(true)
+        .hexpand(true)
+        .build();
+    for item in items {
+        let tile = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        tile.add_css_class("card");
+        tile.add_css_class("icon-card");
+
+        let badge = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        badge.add_css_class("icon-badge");
+        badge.add_css_class(tone_css(item.tone));
+        badge.set_halign(gtk4::Align::Start);
+        let img = gtk4::Image::from_icon_name(
+            item.icon.as_deref().filter(|s| !s.is_empty()).unwrap_or("dialog-information-symbolic"),
+        );
+        img.set_pixel_size(24);
+        badge.append(&img);
+        tile.append(&badge);
+
+        // Largura natural limitada para os cartões caberem lado a lado.
+        let title_lbl = wrapped_label(&item.title, &["heading"]);
+        title_lbl.set_max_width_chars(30);
+        tile.append(&title_lbl);
+        if !item.text.trim().is_empty() {
+            let text_lbl = wrapped_label(&item.text, &["dim-label"]);
+            text_lbl.set_max_width_chars(30);
+            tile.append(&text_lbl);
+        }
+        tile.set_hexpand(true);
+        let fchild = gtk4::FlowBoxChild::builder()
+            .focusable(false)
+            .hexpand(true)
+            .valign(gtk4::Align::Fill)
+            .child(&tile)
+            .build();
+        flow.append(&fchild);
+    }
+    flow.upcast()
+}
+
+/// Glossário: termos que aparecem no panorama explicados em linguagem simples.
+fn build_glossary_widget(title: Option<&str>, items: &[GlossaryItem]) -> gtk4::Widget {
+    let group = adw::PreferencesGroup::new();
+    group.set_title(&glib::markup_escape_text(title.unwrap_or("Glossário")));
+    let list = gtk4::ListBox::new();
+    list.set_selection_mode(gtk4::SelectionMode::None);
+    list.add_css_class("boxed-list");
+    for it in items {
+        let row = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&it.term))
+            .subtitle(glib::markup_escape_text(&it.meaning))
+            .subtitle_lines(0)
+            .activatable(false)
+            .build();
+        let img = gtk4::Image::from_icon_name("accessories-dictionary-symbolic");
+        img.add_css_class("dim-label");
+        row.add_prefix(&img);
+        list.append(&row);
+    }
+    group.add(&list);
+    group.upcast()
 }
 
 fn build_table_widget(
