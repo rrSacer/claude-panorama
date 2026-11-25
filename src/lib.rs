@@ -1,5 +1,10 @@
+pub mod cgroup;
 pub mod cli;
+pub mod client;
 pub mod gui;
+pub mod hardware;
+pub mod ipc;
 pub mod model;
 pub mod schema;
 pub mod store;
+pub mod traycer_bridge;

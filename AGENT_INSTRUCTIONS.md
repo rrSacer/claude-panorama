@@ -78,10 +78,19 @@ Binários em `/home/sacer/.local/bin/`.
 
 - `claude-panorama` ou `panorama gui`: abre a janela.
 - `panorama schema`: imprime a especificação completa com exemplos de todos os blocos.
-- `panorama list`: lista os projetos.
-- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."]`: cria um projeto.
+- `panorama list [--all | --archived]`: lista os projetos (ativos por padrão).
+- `panorama models`: lista harnesses e modelos disponíveis no Traycer.
+- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."] [--harness id] [--model id] [--no-agent]`: cria o projeto e inicia seu agente dedicado no Traycer.
 - `panorama validate <arquivo.json>`: valida o JSON (campos, faixas, cores, referências).
-- `panorama apply <slug> [arquivo.json | -]`: valida, anexa um ponto ao histórico, calcula as variações e grava de forma atômica.
+- `panorama apply <slug> [arquivo.json | -]`: valida, anexa um ponto ao histórico, calcula as variações e grava de forma atômica (preservando `archived`, `agent` e limites de `hardware`).
+- `panorama update <slug>`: pede ao agente dedicado para reinspecionar o projeto e atualizar o panorama.
+- `panorama archive <slug>` / `panorama unarchive <slug>`: arquiva ou restaura o projeto.
+- `panorama delete <slug> --yes`: remove permanentemente o projeto.
+- `panorama move <slug> --up | --down`: reordena o projeto na lista lateral.
+- `panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]`: define limites reais de hardware (CPU/SSD/RAM) via cgroups v2.
+
+### Campo `hardware` (Limites Seletivos)
+Marque `heavy_cpu`, `heavy_ram` e `heavy_ssd` no JSON **somente** para os recursos em que o projeto realmente consome muito hardware (ex.: Rust usa muita CPU, RAM e SSD; projetos leves deixam todos `false`; se não usa muita RAM, deixe `heavy_ram: false`). A interface só exibe os controles para o que está marcado como pesado.
 
 ## 8. Blocos disponíveis (`"type": "..."`)
 

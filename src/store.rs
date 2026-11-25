@@ -1,6 +1,9 @@
 use crate::model::{
-    parse_and_validate_json, HistoryPoint, ProjectDocument, ProjectStatus, ValidationError,
+    parse_and_validate_json, HardwareConfig, HistoryPoint, PanoramaAgentConfig, ProjectDocument, ProjectStatus,
+    ValidationError,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use chrono::Local;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
@@ -139,6 +142,65 @@ pub fn read_project_file(path: &Path) -> Result<ProjectDocument, ValidationError
     Ok(doc)
 }
 
+pub const STATE_FILE_NAME: &str = ".panorama-state.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PanoramaState {
+    #[serde(default)]
+    pub order: Vec<String>,
+    #[serde(default)]
+    pub default_harness: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+}
+
+pub fn state_file_path(dir: &Path) -> PathBuf {
+    dir.join(STATE_FILE_NAME)
+}
+
+pub fn load_state(dir: &Path) -> PanoramaState {
+    let p = state_file_path(dir);
+    let Ok(raw) = fs::read_to_string(p) else {
+        return PanoramaState::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+pub fn save_state(dir: &Path, state: &PanoramaState) -> Result<(), String> {
+    ensure_projects_dir(dir)
+        .map_err(|e| format!("Falha ao preparar diretório `{}`: {e}", dir.display()))?;
+    let mut payload = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Falha ao serializar estado: {e}"))?;
+    payload.push('\n');
+
+    let pid = std::process::id();
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".panorama-state.json.tmp.{pid}.{seq}"));
+    let final_path = state_file_path(dir);
+
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("Falha ao criar temporário `{}`: {e}", tmp_path.display()))?;
+        if let Err(e) = file.write_all(payload.as_bytes()) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("Falha ao gravar estado: {e}"));
+        }
+        let _ = file.sync_all();
+    }
+    let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o666));
+    if let Err(e) = fs::rename(&tmp_path, &final_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Falha ao salvar estado: {e}"));
+    }
+    let _ = fs::set_permissions(&final_path, fs::Permissions::from_mode(0o666));
+    Ok(())
+}
+
 pub struct InitOptions {
     pub slug: String,
     pub title: String,
@@ -146,6 +208,8 @@ pub struct InitOptions {
     pub progresso: f64,
     pub confianca: f64,
     pub phase: String,
+    pub agent: Option<PanoramaAgentConfig>,
+    pub hardware: Option<HardwareConfig>,
 }
 
 pub fn init_project(dir: &Path, opts: InitOptions) -> Result<PathBuf, String> {
@@ -182,6 +246,9 @@ pub fn init_project(dir: &Path, opts: InitOptions) -> Result<PathBuf, String> {
             confianca: opts.confianca,
             note: phase,
         }],
+        archived: false,
+        agent: opts.agent,
+        hardware: opts.hardware,
         ui: Vec::new(),
     };
     doc.validate().map_err(|e| e.to_string())?;
@@ -194,6 +261,8 @@ pub fn apply_project_json(
     raw_json: &str,
 ) -> Result<(PathBuf, ProjectDocument), String> {
     validate_slug(slug)?;
+    let raw_val: serde_json::Value =
+        serde_json::from_str(raw_json).map_err(|e| format!("JSON inválido: {e}"))?;
     let mut doc = parse_and_validate_json(raw_json).map_err(|e| e.to_string())?;
     doc.slug = slug.to_string();
 
@@ -206,6 +275,61 @@ pub fn apply_project_json(
     } else {
         None
     };
+
+    if let Some(prev) = &existing_doc {
+        if raw_val.get("archived").is_none() {
+            doc.archived = prev.archived;
+        }
+        if raw_val.get("agent").is_none() {
+            doc.agent = prev.agent.clone();
+        } else if let (Some(new_ag), Some(prev_ag)) = (doc.agent.as_mut(), prev.agent.as_ref()) {
+            if new_ag.agent_id.is_none() {
+                new_ag.agent_id = prev_ag.agent_id.clone();
+            }
+            if new_ag.epic_id.is_none() {
+                new_ag.epic_id = prev_ag.epic_id.clone();
+            }
+            if new_ag.harness_id.trim().is_empty() {
+                new_ag.harness_id = prev_ag.harness_id.clone();
+            }
+            if new_ag.model.trim().is_empty() {
+                new_ag.model = prev_ag.model.clone();
+            }
+            if new_ag.reasoning_effort.is_none() {
+                new_ag.reasoning_effort = prev_ag.reasoning_effort.clone();
+            }
+            if new_ag.last_requested_at.is_none() {
+                new_ag.last_requested_at = prev_ag.last_requested_at.clone();
+            }
+        }
+        match (doc.hardware.as_mut(), prev.hardware.as_ref()) {
+            (None, Some(prev_hw)) => doc.hardware = Some(prev_hw.clone()),
+            (Some(new_hw), Some(prev_hw)) => {
+                if new_hw.cpu_cores.is_none() {
+                    new_hw.cpu_cores = prev_hw.cpu_cores;
+                }
+                if new_hw.ssd_percent.is_none() {
+                    new_hw.ssd_percent = prev_hw.ssd_percent;
+                }
+                if new_hw.max_ram_gb.is_none() {
+                    new_hw.max_ram_gb = prev_hw.max_ram_gb;
+                }
+                if new_hw.heavy_cpu.is_none() {
+                    new_hw.heavy_cpu = prev_hw.heavy_cpu;
+                }
+                if new_hw.heavy_ram.is_none() {
+                    new_hw.heavy_ram = prev_hw.heavy_ram;
+                }
+                if new_hw.heavy_ssd.is_none() {
+                    new_hw.heavy_ssd = prev_hw.heavy_ssd;
+                }
+                if new_hw.reason.trim().is_empty() {
+                    new_hw.reason = prev_hw.reason.clone();
+                }
+            }
+            _ => {}
+        }
+    }
 
     if doc.history.is_empty() {
         if let Some(prev) = &existing_doc {
@@ -281,21 +405,149 @@ pub fn load_all_projects(dir: &Path) -> LoadedProjects {
         }
     }
 
-    // Ordenar: ativos/validando/bloqueados primeiro, depois por slug estável
+    let state = load_state(dir);
+    let order_map: HashMap<&str, usize> = state
+        .order
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
+
+    // Ordenar: primeiro pela ordem personalizada salva em .panorama-state.json;
+    // projetos novos ainda não ordenados seguem por status e slug.
     out.projects.sort_by(|a, b| {
-        let rank = |s: ProjectStatus| match s {
-            ProjectStatus::Validando => 0,
-            ProjectStatus::Ativo => 1,
-            ProjectStatus::Bloqueado => 2,
-            ProjectStatus::Pausado => 3,
-            ProjectStatus::Concluido => 4,
-        };
-        rank(a.status)
-            .cmp(&rank(b.status))
-            .then_with(|| a.slug.cmp(&b.slug))
+        let oa = order_map.get(a.slug.as_str()).copied();
+        let ob = order_map.get(b.slug.as_str()).copied();
+        match (oa, ob) {
+            (Some(ia), Some(ib)) => ia.cmp(&ib),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => {
+                let rank = |s: ProjectStatus| match s {
+                    ProjectStatus::Validando => 0,
+                    ProjectStatus::Ativo => 1,
+                    ProjectStatus::Bloqueado => 2,
+                    ProjectStatus::Pausado => 3,
+                    ProjectStatus::Concluido => 4,
+                };
+                rank(a.status)
+                    .cmp(&rank(b.status))
+                    .then_with(|| a.slug.cmp(&b.slug))
+            }
+        }
     });
 
     out
+}
+
+pub fn move_project_in_order(
+    dir: &Path,
+    slug: &str,
+    move_up: bool,
+    visible_slugs: Option<&[String]>,
+) -> Result<(), String> {
+    validate_slug(slug)?;
+    let loaded = load_all_projects(dir);
+    let mut state = load_state(dir);
+    for p in &loaded.projects {
+        if !state.order.iter().any(|s| s == &p.slug) {
+            state.order.push(p.slug.clone());
+        }
+    }
+    state
+        .order
+        .retain(|s| loaded.projects.iter().any(|p| &p.slug == s));
+
+    let Some(cur_idx) = state.order.iter().position(|s| s == slug) else {
+        return Err(format!("Projeto `{slug}` não encontrado na lista."));
+    };
+
+    let neighbor_idx = if let Some(vis) = visible_slugs {
+        let Some(vis_pos) = vis.iter().position(|s| s == slug) else {
+            return Ok(());
+        };
+        let target_vis = if move_up {
+            vis_pos.checked_sub(1)
+        } else if vis_pos + 1 < vis.len() {
+            Some(vis_pos + 1)
+        } else {
+            None
+        };
+        let Some(tv) = target_vis else {
+            return Ok(());
+        };
+        let neighbor_slug = &vis[tv];
+        state.order.iter().position(|s| s == neighbor_slug)
+    } else if move_up {
+        cur_idx.checked_sub(1)
+    } else if cur_idx + 1 < state.order.len() {
+        Some(cur_idx + 1)
+    } else {
+        None
+    };
+
+    if let Some(n_idx) = neighbor_idx {
+        state.order.swap(cur_idx, n_idx);
+        save_state(dir, &state)?;
+    }
+    Ok(())
+}
+
+pub fn set_project_archived(
+    dir: &Path,
+    slug: &str,
+    archived: bool,
+) -> Result<ProjectDocument, String> {
+    validate_slug(slug)?;
+    let path = project_file_path(dir, slug);
+    let mut doc = read_project_file(&path).map_err(|e| e.to_string())?;
+    doc.slug = slug.to_string();
+    doc.archived = archived;
+    atomic_write_project(dir, slug, &doc)?;
+    Ok(doc)
+}
+
+pub fn delete_project(dir: &Path, slug: &str) -> Result<(), String> {
+    validate_slug(slug)?;
+    let path = project_file_path(dir, slug);
+    if !path.exists() {
+        return Err(format!("Projeto `{slug}` não existe em `{}`.", dir.display()));
+    }
+    fs::remove_file(&path)
+        .map_err(|e| format!("Falha ao deletar `{}`: {e}", path.display()))?;
+    let mut state = load_state(dir);
+    state.order.retain(|s| s != slug);
+    let _ = save_state(dir, &state);
+    Ok(())
+}
+
+pub fn update_project_agent(
+    dir: &Path,
+    slug: &str,
+    agent: PanoramaAgentConfig,
+) -> Result<ProjectDocument, String> {
+    validate_slug(slug)?;
+    let path = project_file_path(dir, slug);
+    let mut doc = read_project_file(&path).map_err(|e| e.to_string())?;
+    doc.slug = slug.to_string();
+    doc.agent = Some(agent);
+    atomic_write_project(dir, slug, &doc)?;
+    Ok(doc)
+}
+
+pub fn update_project_hardware(
+    dir: &Path,
+    slug: &str,
+    hardware: HardwareConfig,
+) -> Result<ProjectDocument, String> {
+    validate_slug(slug)?;
+    let path = project_file_path(dir, slug);
+    let mut doc = read_project_file(&path).map_err(|e| e.to_string())?;
+    doc.slug = slug.to_string();
+    doc.hardware = Some(hardware);
+    doc.validate().map_err(|e| e.to_string())?;
+    atomic_write_project(dir, slug, &doc)?;
+    Ok(doc)
 }
 
 pub fn compute_dir_fingerprint(dir: &Path) -> u64 {
@@ -308,7 +560,7 @@ pub fn compute_dir_fingerprint(dir: &Path) -> u64 {
         .filter_map(|e| e.ok())
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            if name.starts_with('.') || !name.ends_with(".json") {
+            if name != STATE_FILE_NAME && (name.starts_with('.') || !name.ends_with(".json")) {
                 return None;
             }
             let meta = entry.metadata().ok()?;
@@ -353,6 +605,8 @@ mod tests {
                 progresso: 10.0,
                 confianca: 60.0,
                 phase: "Onda 0".to_string(),
+                agent: None,
+                hardware: None,
             },
         )
         .expect("init must succeed");
@@ -391,5 +645,73 @@ mod tests {
         assert!(validate_slug("").is_err());
         assert!(validate_slug("-bad").is_err());
         assert!(validate_slug("horizon-ntm_01").is_ok());
+    }
+
+    #[test]
+    fn archive_order_delete_and_apply_preserves_metadata() {
+        let dir = temp_test_dir("state-ops");
+        for (slug, title) in [("alpha", "Alpha"), ("beta", "Beta"), ("gamma", "Gamma")] {
+            init_project(
+                &dir,
+                InitOptions {
+                    slug: slug.into(),
+                    title: title.into(),
+                    path: String::new(),
+                    progresso: 10.0,
+                    confianca: 50.0,
+                    phase: "Init".into(),
+                    agent: None,
+                    hardware: None,
+                },
+            )
+            .unwrap();
+        }
+        update_project_agent(
+            &dir,
+            "alpha",
+            PanoramaAgentConfig {
+                agent_id: Some("ag-123".into()),
+                epic_id: Some("ep-123".into()),
+                harness_id: "antigravity".into(),
+                model: "gemini-4-hydrogen".into(),
+                reasoning_effort: Some("high".into()),
+                last_requested_at: None,
+                last_status: None,
+            },
+        )
+        .unwrap();
+        update_project_hardware(
+            &dir,
+            "alpha",
+            HardwareConfig {
+                heavy_cpu: Some(true),
+                cpu_cores: Some(4),
+                ssd_percent: Some(60),
+                max_ram_gb: Some(10.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        set_project_archived(&dir, "alpha", true).unwrap();
+
+        // apply sem os campos de metadados deve preservá-los!
+        let (_, applied) =
+            apply_project_json(&dir, "alpha", r#"{"title":"Alpha","progresso":50,"confianca":80}"#)
+                .unwrap();
+        assert!(applied.archived);
+        assert_eq!(applied.agent.as_ref().unwrap().agent_id.as_deref(), Some("ag-123"));
+        assert_eq!(applied.hardware.as_ref().unwrap().cpu_cores, Some(4));
+
+        // Reordenação com setas
+        move_project_in_order(&dir, "gamma", true, None).unwrap();
+        let loaded = load_all_projects(&dir);
+        let slugs: Vec<_> = loaded.projects.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["alpha", "gamma", "beta"]);
+
+        delete_project(&dir, "beta").unwrap();
+        let loaded2 = load_all_projects(&dir);
+        assert_eq!(loaded2.projects.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

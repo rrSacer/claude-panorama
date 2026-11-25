@@ -2,26 +2,111 @@ use crate::gui::charts::{
     build_bar_chart_widget, build_donut_widget, build_flow_graph_widget, build_matrix_widget,
     build_ring_gauge, build_sparkline, build_step_marker, GaugeKind,
 };
+use crate::hardware::{
+    detect_project_hardware, LiveHardwareStats, SystemHardwareSpecs,
+};
+use crate::ipc::TraycerCatalog;
 use crate::model::{
-    CardItem, CellState, GlossaryItem, KpiStatus, ProjectDocument, StepItem, Tone, UiNode,
+    CardItem, CellState, GlossaryItem, HardwareConfig, KpiStatus, ProjectDocument, StepItem, Tone,
+    UiNode,
 };
 use gtk4::glib;
 use gtk4::pango;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::rc::Rc;
+
+#[derive(Clone)]
+pub struct ProjectViewCallbacks {
+    pub catalog: TraycerCatalog,
+    pub hw_specs: SystemHardwareSpecs,
+    pub live_hw: Option<LiveHardwareStats>,
+    pub on_start_or_configure_agent: Rc<dyn Fn(String, String, Option<String>)>,
+    pub on_request_update: Rc<dyn Fn()>,
+    pub on_refresh_models: Rc<dyn Fn()>,
+    pub on_hardware_changed: Rc<dyn Fn(HardwareConfig)>,
+}
+
+#[derive(Default, Clone)]
+pub struct LiveHardwareWidgets {
+    pub slug: String,
+    pub show_cpu: bool,
+    pub show_ram: bool,
+    pub show_ssd: bool,
+    pub status_pill: Option<gtk4::Label>,
+    pub cpu_live_lbl: Option<gtk4::Label>,
+    pub cpu_bar: Option<gtk4::ProgressBar>,
+    pub ssd_live_lbl: Option<gtk4::Label>,
+    pub ssd_bar: Option<gtk4::ProgressBar>,
+    pub ram_live_lbl: Option<gtk4::Label>,
+    pub ram_bar: Option<gtk4::ProgressBar>,
+}
+
+impl LiveHardwareWidgets {
+    pub fn update(&self, stats: &LiveHardwareStats, specs: &SystemHardwareSpecs) {
+        if let Some(pill) = &self.status_pill {
+            pill.remove_css_class("pill-pass");
+            pill.remove_css_class("pill-run");
+            pill.remove_css_class("pill-pend");
+            if stats.active_pids > 0 && stats.enforced {
+                pill.set_text(&format!("Limitado · {} proc.", stats.active_pids));
+                pill.add_css_class("pill-pass");
+            } else if stats.active_pids > 0 {
+                pill.set_text(&format!("Ativo · {} proc.", stats.active_pids));
+                pill.add_css_class("pill-run");
+            } else if stats.enforced {
+                pill.set_text("Limite armado");
+                pill.add_css_class("pill-pass");
+            } else {
+                pill.set_text("Ocioso");
+                pill.add_css_class("pill-pend");
+            }
+        }
+        if let (Some(lbl), Some(bar)) = (&self.cpu_live_lbl, &self.cpu_bar) {
+            let approx_cores = (stats.cpu_percent / 100.0) * (specs.total_cpus as f64);
+            lbl.set_text(&format!(
+                "Uso atual: {:.1}% (~{:.1} de {} núcleos)",
+                stats.cpu_percent, approx_cores, specs.total_cpus
+            ));
+            bar.set_fraction((stats.cpu_percent / 100.0).clamp(0.0, 1.0));
+        }
+        if let (Some(lbl), Some(bar)) = (&self.ssd_live_lbl, &self.ssd_bar) {
+            lbl.set_text(&format!(
+                "Taxa atual: {:.1} MB/s ({:.1}%)",
+                stats.ssd_mb_s, stats.ssd_percent
+            ));
+            bar.set_fraction((stats.ssd_percent / 100.0).clamp(0.0, 1.0));
+        }
+        if let (Some(lbl), Some(bar)) = (&self.ram_live_lbl, &self.ram_bar) {
+            let used_gb = stats.ram_used_mb / 1024.0;
+            let total = specs.total_ram_gb.max(1.0);
+            lbl.set_text(&format!(
+                "Uso atual: {:.2} GB ({:.0} MB) de {:.1} GB",
+                used_gb, stats.ram_used_mb, total
+            ));
+            bar.set_fraction((used_gb / total).clamp(0.0, 1.0));
+        }
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct UiViewState {
     pub active_tabs: Rc<RefCell<HashMap<String, String>>>,
     pub expanded_rows: Rc<RefCell<HashMap<String, bool>>>,
+    pub live_hw_widgets: Rc<RefCell<Option<LiveHardwareWidgets>>>,
 }
 
-pub fn render_project_view(doc: &ProjectDocument, state: &UiViewState) -> gtk4::Widget {
+pub fn render_project_view(
+    doc: &ProjectDocument,
+    state: &UiViewState,
+    callbacks: &ProjectViewCallbacks,
+) -> gtk4::Widget {
+    *state.live_hw_widgets.borrow_mut() = None;
+
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
     root.set_margin_top(16);
     root.set_margin_bottom(28);
@@ -31,10 +116,18 @@ pub fn render_project_view(doc: &ProjectDocument, state: &UiViewState) -> gtk4::
     // 1. Faixa de identificação do projeto
     root.append(&build_project_banner(doc));
 
-    // 2. Cabeçalho Fixo Obrigatório (Progresso + Confiança)
+    // 2. Painel do Agente Dedicado + Limites Seletivos de Hardware em Tempo Real
+    root.append(&build_dedicated_agent_card(doc, callbacks));
+
+    if let Some((hw_card, live_widgets)) = build_selective_hardware_card(doc, callbacks) {
+        *state.live_hw_widgets.borrow_mut() = Some(live_widgets);
+        root.append(&hw_card);
+    }
+
+    // 3. Cabeçalho Fixo Obrigatório (Progresso + Confiança)
     root.append(&build_fixed_header_pair(doc, state));
 
-    // 3. Área Dinâmica Livre (`ui`)
+    // 4. Área Dinâmica Livre (`ui`)
     if doc.ui.is_empty() {
         let slug_cmd = if doc.slug.is_empty() {
             "<slug>"
@@ -70,6 +163,620 @@ pub fn render_project_view(doc: &ProjectDocument, state: &UiViewState) -> gtk4::
         .build();
 
     clamp.upcast()
+}
+
+fn build_dedicated_agent_card(
+    doc: &ProjectDocument,
+    callbacks: &ProjectViewCallbacks,
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let icon = gtk4::Image::from_icon_name("avatar-default-symbolic");
+    icon.set_pixel_size(20);
+    icon.set_valign(gtk4::Align::Center);
+    icon.add_css_class("accent");
+    top.append(&icon);
+
+    let title_col = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    title_col.set_hexpand(true);
+
+    let title_line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let title_lbl = gtk4::Label::new(Some("Agente Dedicado (Panorama)"));
+    title_lbl.add_css_class("heading");
+    title_lbl.set_xalign(0.0);
+    title_line.append(&title_lbl);
+
+    let has_agent = doc
+        .agent
+        .as_ref()
+        .and_then(|a| a.agent_id.as_deref())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    let pill = if has_agent {
+        let aid = doc
+            .agent
+            .as_ref()
+            .and_then(|a| a.agent_id.as_deref())
+            .unwrap_or("");
+        let short_id = if aid.len() > 8 { &aid[..8] } else { aid };
+        let l = gtk4::Label::new(Some(&format!("Ativo · {short_id}")));
+        l.add_css_class("mini-pill");
+        l.add_css_class("pill-pass");
+        l
+    } else {
+        let l = gtk4::Label::new(Some("Não iniciado"));
+        l.add_css_class("mini-pill");
+        l.add_css_class("pill-pend");
+        l
+    };
+    title_line.append(&pill);
+    title_col.append(&title_line);
+
+    let mut sub_parts: Vec<String> = Vec::new();
+    if let Some(ag) = &doc.agent {
+        if let Some(st) = &ag.last_status {
+            if !st.trim().is_empty() {
+                sub_parts.push(st.clone());
+            }
+        }
+        if let Some(ts) = &ag.last_requested_at {
+            if !ts.trim().is_empty() {
+                sub_parts.push(format!("Último pedido: {ts}"));
+            }
+        }
+    }
+    if sub_parts.is_empty() {
+        sub_parts.push("Monta este panorama do zero, monitora o projeto e atualiza quando você clicar em Atualizar.".to_string());
+    }
+    let sub_lbl = gtk4::Label::new(Some(&sub_parts.join(" · ")));
+    sub_lbl.add_css_class("caption");
+    sub_lbl.add_css_class("dim-label");
+    sub_lbl.set_xalign(0.0);
+    sub_lbl.set_wrap(true);
+    sub_lbl.set_wrap_mode(pango::WrapMode::WordChar);
+    title_col.append(&sub_lbl);
+    top.append(&title_col);
+
+    let refresh_models_btn = gtk4::Button::from_icon_name("system-run-symbolic");
+    refresh_models_btn.add_css_class("flat");
+    refresh_models_btn.set_valign(gtk4::Align::Center);
+    refresh_models_btn.set_tooltip_text(Some("Recarregar modelos disponíveis no Traycer"));
+    let on_refresh_models = callbacks.on_refresh_models.clone();
+    refresh_models_btn.connect_clicked(move |_| {
+        on_refresh_models();
+    });
+    top.append(&refresh_models_btn);
+
+    let update_now_btn = gtk4::Button::builder()
+        .label("Pedir Atualização")
+        .icon_name("view-refresh-symbolic")
+        .valign(gtk4::Align::Center)
+        .build();
+    update_now_btn.set_tooltip_text(Some("Enviar pedido ao agente dedicado para atualizar este panorama"));
+    let on_req = callbacks.on_request_update.clone();
+    update_now_btn.connect_clicked(move |_| {
+        on_req();
+    });
+    top.append(&update_now_btn);
+    card.append(&top);
+
+    // Linha de seleção de Harness + Modelo + Esforço (Traycer)
+    let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    controls.set_hexpand(true);
+
+    let mut harnesses = callbacks.catalog.harnesses.clone();
+    let saved_harness = doc
+        .agent
+        .as_ref()
+        .map(|a| a.harness_id.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            harnesses
+                .first()
+                .map(|h| h.id.clone())
+                .unwrap_or_else(|| "antigravity".to_string())
+        });
+    let saved_model = doc
+        .agent
+        .as_ref()
+        .map(|a| a.model.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let saved_effort = doc
+        .agent
+        .as_ref()
+        .and_then(|a| a.reasoning_effort.clone());
+
+    if harnesses.is_empty() {
+        harnesses.push(crate::ipc::TraycerHarnessInfo {
+            id: saved_harness.clone(),
+            label: saved_harness.clone(),
+            models: if saved_model.is_empty() {
+                vec![]
+            } else {
+                vec![crate::ipc::TraycerModelInfo {
+                    id: saved_model.clone(),
+                    reasoning_efforts: saved_effort.clone().into_iter().collect(),
+                    fast_mode_available: false,
+                }]
+            },
+        });
+    }
+
+    let harness_labels: Vec<String> = harnesses
+        .iter()
+        .map(|h| format!("{} ({})", h.label, h.id))
+        .collect();
+    let harness_str_refs: Vec<&str> = harness_labels.iter().map(|s| s.as_str()).collect();
+    let harness_dd = gtk4::DropDown::from_strings(&harness_str_refs);
+    harness_dd.set_tooltip_text(Some("Harness do agente no Traycer"));
+    let initial_h_idx = harnesses
+        .iter()
+        .position(|h| h.id == saved_harness)
+        .unwrap_or(0);
+    harness_dd.set_selected(initial_h_idx as u32);
+
+    let model_dd = gtk4::DropDown::from_strings(&[]);
+    model_dd.set_hexpand(true);
+    model_dd.set_tooltip_text(Some("Modelo do Traycer usado pelo agente"));
+
+    let effort_dd = gtk4::DropDown::from_strings(&[]);
+    effort_dd.set_tooltip_text(Some("Nível de raciocínio suportado pelo modelo"));
+
+    let apply_btn = gtk4::Button::builder()
+        .label(if has_agent { "Aplicar Modelo" } else { "Iniciar Agente" })
+        .valign(gtk4::Align::Center)
+        .build();
+    if !has_agent {
+        apply_btn.add_css_class("suggested-action");
+    }
+
+    let harnesses_rc = Rc::new(harnesses);
+    let current_models: Rc<RefCell<Vec<crate::ipc::TraycerModelInfo>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let current_efforts: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let syncing = Rc::new(Cell::new(false));
+
+    let populate_efforts = {
+        let current_efforts = current_efforts.clone();
+        let effort_dd = effort_dd.clone();
+        move |efforts: &[String], preferred: Option<&str>| {
+            *current_efforts.borrow_mut() = efforts.to_vec();
+            if efforts.is_empty() {
+                let empty_model = gtk4::StringList::new(&[]);
+                effort_dd.set_model(Some(&empty_model));
+                effort_dd.set_visible(false);
+            } else {
+                let refs: Vec<&str> = efforts.iter().map(|s| s.as_str()).collect();
+                let list = gtk4::StringList::new(&refs);
+                effort_dd.set_model(Some(&list));
+                let idx = preferred
+                    .and_then(|p| efforts.iter().position(|e| e == p))
+                    .or_else(|| efforts.iter().position(|e| e == "high"))
+                    .unwrap_or(0);
+                effort_dd.set_selected(idx as u32);
+                effort_dd.set_visible(true);
+            }
+        }
+    };
+
+    let populate_models = {
+        let harnesses_rc = harnesses_rc.clone();
+        let current_models = current_models.clone();
+        let model_dd = model_dd.clone();
+        let populate_efforts = populate_efforts.clone();
+        move |h_idx: usize, preferred_model: Option<&str>, preferred_effort: Option<&str>| {
+            let models = harnesses_rc
+                .get(h_idx)
+                .map(|h| h.models.clone())
+                .unwrap_or_default();
+            *current_models.borrow_mut() = models.clone();
+            let refs: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+            let list = gtk4::StringList::new(&refs);
+            model_dd.set_model(Some(&list));
+            if models.is_empty() {
+                populate_efforts(&[], None);
+            } else {
+                let m_idx = preferred_model
+                    .and_then(|pm| models.iter().position(|m| m.id == pm))
+                    .unwrap_or(0);
+                model_dd.set_selected(m_idx as u32);
+                populate_efforts(&models[m_idx].reasoning_efforts, preferred_effort);
+            }
+        }
+    };
+
+    syncing.set(true);
+    populate_models(
+        initial_h_idx,
+        if saved_model.is_empty() { None } else { Some(saved_model.as_str()) },
+        saved_effort.as_deref(),
+    );
+    syncing.set(false);
+
+    {
+        let syncing = syncing.clone();
+        let populate_models = populate_models.clone();
+        let apply_btn = apply_btn.clone();
+        harness_dd.connect_selected_notify(move |dd| {
+            if syncing.get() {
+                return;
+            }
+            syncing.set(true);
+            populate_models(dd.selected() as usize, None, None);
+            syncing.set(false);
+            apply_btn.add_css_class("suggested-action");
+        });
+    }
+
+    {
+        let syncing = syncing.clone();
+        let current_models = current_models.clone();
+        let populate_efforts = populate_efforts.clone();
+        let apply_btn = apply_btn.clone();
+        model_dd.connect_selected_notify(move |dd| {
+            if syncing.get() {
+                return;
+            }
+            syncing.set(true);
+            let idx = dd.selected() as usize;
+            let models = current_models.borrow();
+            if let Some(m) = models.get(idx) {
+                populate_efforts(&m.reasoning_efforts, None);
+            }
+            syncing.set(false);
+            apply_btn.add_css_class("suggested-action");
+        });
+    }
+
+    {
+        let syncing = syncing.clone();
+        let apply_btn = apply_btn.clone();
+        effort_dd.connect_selected_notify(move |_| {
+            if !syncing.get() {
+                apply_btn.add_css_class("suggested-action");
+            }
+        });
+    }
+
+    {
+        let harnesses_rc = harnesses_rc.clone();
+        let current_models = current_models.clone();
+        let current_efforts = current_efforts.clone();
+        let harness_dd = harness_dd.clone();
+        let model_dd = model_dd.clone();
+        let effort_dd = effort_dd.clone();
+        let on_cfg = callbacks.on_start_or_configure_agent.clone();
+        apply_btn.connect_clicked(move |_| {
+            let h_idx = harness_dd.selected() as usize;
+            let Some(h) = harnesses_rc.get(h_idx) else {
+                return;
+            };
+            let m_idx = model_dd.selected() as usize;
+            let models = current_models.borrow();
+            let Some(m) = models.get(m_idx) else {
+                return;
+            };
+            let eff = if effort_dd.is_visible() {
+                current_efforts
+                    .borrow()
+                    .get(effort_dd.selected() as usize)
+                    .cloned()
+            } else {
+                None
+            };
+            on_cfg(h.id.clone(), m.id.clone(), eff);
+        });
+    }
+
+    controls.append(&harness_dd);
+    controls.append(&model_dd);
+    controls.append(&effort_dd);
+    controls.append(&apply_btn);
+    card.append(&controls);
+
+    card.upcast()
+}
+
+fn build_selective_hardware_card(
+    doc: &ProjectDocument,
+    callbacks: &ProjectViewCallbacks,
+) -> Option<(gtk4::Widget, LiveHardwareWidgets)> {
+    let needs = detect_project_hardware(doc, callbacks.live_hw.as_ref());
+    if !needs.any() {
+        return None;
+    }
+
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    card.add_css_class("card");
+    card.add_css_class("panorama-block-card");
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let icon = gtk4::Image::from_icon_name("computer-symbolic");
+    icon.set_pixel_size(20);
+    icon.set_valign(gtk4::Align::Center);
+    icon.add_css_class("accent");
+    top.append(&icon);
+
+    let title_col = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    title_col.set_hexpand(true);
+    let title = gtk4::Label::new(Some("Limites de Hardware em Tempo Real"));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title_col.append(&title);
+
+    if !needs.reason.is_empty() {
+        let r = gtk4::Label::new(Some(&needs.reason));
+        r.add_css_class("caption");
+        r.add_css_class("dim-label");
+        r.set_xalign(0.0);
+        r.set_wrap(true);
+        r.set_wrap_mode(pango::WrapMode::WordChar);
+        title_col.append(&r);
+    }
+    top.append(&title_col);
+
+    let status_pill = gtk4::Label::new(Some("Monitorando"));
+    status_pill.add_css_class("mini-pill");
+    status_pill.add_css_class("pill-pend");
+    status_pill.set_valign(gtk4::Align::Center);
+    top.append(&status_pill);
+    card.append(&top);
+
+    let hw_state = Rc::new(RefCell::new(HardwareConfig {
+        heavy_cpu: doc.hardware.as_ref().and_then(|h| h.heavy_cpu).or(Some(needs.show_cpu)),
+        heavy_ram: doc.hardware.as_ref().and_then(|h| h.heavy_ram).or(Some(needs.show_ram)),
+        heavy_ssd: doc.hardware.as_ref().and_then(|h| h.heavy_ssd).or(Some(needs.show_ssd)),
+        reason: if !needs.reason.is_empty() {
+            needs.reason.clone()
+        } else {
+            doc.hardware.as_ref().map(|h| h.reason.clone()).unwrap_or_default()
+        },
+        cpu_cores: doc.hardware.as_ref().and_then(|h| h.cpu_cores),
+        ssd_percent: doc.hardware.as_ref().and_then(|h| h.ssd_percent),
+        max_ram_gb: doc.hardware.as_ref().and_then(|h| h.max_ram_gb),
+    }));
+
+    let mut live_widgets = LiveHardwareWidgets {
+        slug: doc.slug.clone(),
+        show_cpu: needs.show_cpu,
+        show_ram: needs.show_ram,
+        show_ssd: needs.show_ssd,
+        status_pill: Some(status_pill),
+        ..Default::default()
+    };
+
+    let grid = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+
+    // 1. CPU (apenas se o projeto usa muita CPU)
+    if needs.show_cpu {
+        let total = callbacks.hw_specs.total_cpus.max(1) as f64;
+        let default_cores = ((total * 0.75).round() as u32).max(1);
+        let init_enabled = hw_state.borrow().cpu_cores.is_some();
+        let init_val = hw_state.borrow().cpu_cores.unwrap_or(default_cores) as f64;
+
+        let (row_widget, live_lbl, bar) = build_hw_slider_row(
+            "Núcleos de CPU",
+            init_enabled,
+            1.0,
+            total,
+            1.0,
+            init_val,
+            0,
+            "núcleos",
+            {
+                let hw_state = hw_state.clone();
+                let on_change = callbacks.on_hardware_changed.clone();
+                move |enabled, val| {
+                    let mut st = hw_state.borrow_mut();
+                    st.cpu_cores = if enabled { Some(val.round() as u32) } else { None };
+                    on_change(st.clone());
+                }
+            },
+        );
+        live_widgets.cpu_live_lbl = Some(live_lbl);
+        live_widgets.cpu_bar = Some(bar);
+        grid.append(&row_widget);
+    }
+
+    // 2. SSD (apenas se o projeto usa muito SSD)
+    if needs.show_ssd {
+        let init_enabled = hw_state.borrow().ssd_percent.is_some();
+        let init_val = hw_state.borrow().ssd_percent.unwrap_or(60) as f64;
+
+        let (row_widget, live_lbl, bar) = build_hw_slider_row(
+            "Uso máximo do SSD (%)",
+            init_enabled,
+            5.0,
+            100.0,
+            5.0,
+            init_val,
+            0,
+            "%",
+            {
+                let hw_state = hw_state.clone();
+                let on_change = callbacks.on_hardware_changed.clone();
+                move |enabled, val| {
+                    let mut st = hw_state.borrow_mut();
+                    st.ssd_percent = if enabled { Some(val.round() as u32) } else { None };
+                    on_change(st.clone());
+                }
+            },
+        );
+        live_widgets.ssd_live_lbl = Some(live_lbl);
+        live_widgets.ssd_bar = Some(bar);
+        grid.append(&row_widget);
+    }
+
+    // 3. RAM (apenas se o projeto usa muita RAM)
+    if needs.show_ram {
+        let max_gb = callbacks.hw_specs.total_ram_gb.max(2.0);
+        let default_ram = ((max_gb * 0.5 * 2.0).round() / 2.0).max(1.0);
+        let init_enabled = hw_state.borrow().max_ram_gb.is_some();
+        let init_val = hw_state.borrow().max_ram_gb.unwrap_or(default_ram);
+
+        let (row_widget, live_lbl, bar) = build_hw_slider_row(
+            "Máximo de RAM (GB)",
+            init_enabled,
+            0.5,
+            max_gb,
+            0.5,
+            init_val,
+            1,
+            "GB",
+            {
+                let hw_state = hw_state.clone();
+                let on_change = callbacks.on_hardware_changed.clone();
+                move |enabled, val| {
+                    let mut st = hw_state.borrow_mut();
+                    st.max_ram_gb = if enabled {
+                        Some((val * 10.0).round() / 10.0)
+                    } else {
+                        None
+                    };
+                    on_change(st.clone());
+                }
+            },
+        );
+        live_widgets.ram_live_lbl = Some(live_lbl);
+        live_widgets.ram_bar = Some(bar);
+        grid.append(&row_widget);
+    }
+
+    card.append(&grid);
+    if let Some(st) = &callbacks.live_hw {
+        live_widgets.update(st, &callbacks.hw_specs);
+    }
+
+    Some((card.upcast(), live_widgets))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_hw_slider_row<F>(
+    title: &str,
+    initial_enabled: bool,
+    min: f64,
+    max: f64,
+    step: f64,
+    initial_val: f64,
+    digits: i32,
+    unit: &str,
+    on_commit: F,
+) -> (gtk4::Widget, gtk4::Label, gtk4::ProgressBar)
+where
+    F: Fn(bool, f64) + 'static,
+{
+    let box_row = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    box_row.add_css_class("hw-limit-row");
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let lbl = gtk4::Label::new(Some(title));
+    lbl.add_css_class("caption-heading");
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    top.append(&lbl);
+
+    let live_lbl = gtk4::Label::new(Some("Aguardando leitura..."));
+    live_lbl.add_css_class("caption");
+    live_lbl.add_css_class("dim-label");
+    live_lbl.set_valign(gtk4::Align::Center);
+    top.append(&live_lbl);
+
+    let val_lbl = gtk4::Label::new(None);
+    val_lbl.add_css_class("mini-pill");
+    val_lbl.add_css_class(if initial_enabled { "pill-run" } else { "pill-pend" });
+    val_lbl.set_valign(gtk4::Align::Center);
+    top.append(&val_lbl);
+
+    let sw = gtk4::Switch::builder()
+        .active(initial_enabled)
+        .valign(gtk4::Align::Center)
+        .tooltip_text("Ativar/desativar limite em tempo real")
+        .build();
+    top.append(&sw);
+    box_row.append(&top);
+
+    let bar = gtk4::ProgressBar::new();
+    bar.add_css_class("panorama-linear-bar");
+    bar.set_hexpand(true);
+    box_row.append(&bar);
+
+    let scale = gtk4::Scale::with_range(gtk4::Orientation::Horizontal, min, max.max(min + step), step);
+    scale.set_value(initial_val.clamp(min, max.max(min + step)));
+    scale.set_digits(digits);
+    scale.set_draw_value(false);
+    scale.set_hexpand(true);
+    scale.set_sensitive(initial_enabled);
+    box_row.append(&scale);
+
+    let fmt_val = {
+        let unit = unit.to_string();
+        move |enabled: bool, v: f64| -> String {
+            if !enabled {
+                "Sem limite".to_string()
+            } else if digits == 0 {
+                format!("Limite: {} {}", v.round() as u32, unit)
+            } else {
+                format!("Limite: {:.1} {}", v, unit)
+            }
+        }
+    };
+    val_lbl.set_text(&fmt_val(initial_enabled, scale.value()));
+
+    let on_commit = Rc::new(on_commit);
+    let debounce_id: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
+    {
+        let scale = scale.clone();
+        let val_lbl = val_lbl.clone();
+        let fmt_val = fmt_val.clone();
+        let on_commit = on_commit.clone();
+        let debounce_id = debounce_id.clone();
+        sw.connect_state_set(move |_, active| {
+            scale.set_sensitive(active);
+            val_lbl.remove_css_class("pill-run");
+            val_lbl.remove_css_class("pill-pend");
+            val_lbl.add_css_class(if active { "pill-run" } else { "pill-pend" });
+            val_lbl.set_text(&fmt_val(active, scale.value()));
+            if let Some(id) = debounce_id.borrow_mut().take() {
+                id.remove();
+            }
+            on_commit(active, scale.value());
+            glib::Propagation::Proceed
+        });
+    }
+
+    {
+        let sw = sw.clone();
+        let val_lbl = val_lbl.clone();
+        let fmt_val = fmt_val.clone();
+        let on_commit = on_commit.clone();
+        let debounce_id = debounce_id.clone();
+        scale.connect_value_changed(move |sc| {
+            let active = sw.is_active();
+            let v = sc.value();
+            val_lbl.set_text(&fmt_val(active, v));
+            if !active {
+                return;
+            }
+            if let Some(id) = debounce_id.borrow_mut().take() {
+                id.remove();
+            }
+            let on_commit = on_commit.clone();
+            let debounce_id_inner = debounce_id.clone();
+            let src_id = glib::timeout_add_local_once(std::time::Duration::from_millis(180), move || {
+                *debounce_id_inner.borrow_mut() = None;
+                on_commit(true, v);
+            });
+            *debounce_id.borrow_mut() = Some(src_id);
+        });
+    }
+
+    (box_row.upcast(), live_lbl, bar)
 }
 
 fn build_project_banner(doc: &ProjectDocument) -> gtk4::Widget {

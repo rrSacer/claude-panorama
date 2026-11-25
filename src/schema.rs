@@ -59,6 +59,18 @@ Regras obrigatórias de conteúdo (leia `AGENT_INSTRUCTIONS.md` do projeto claud
     }
   ],
 
+  // === ARQUIVAMENTO / AGENTE / HARDWARE SELETIVO (preservados automaticamente no `panorama apply`) ===
+  "archived": false,
+  "hardware": {
+    "heavy_cpu": true,                      // marque true SOMENTE se o projeto usa muita CPU
+    "heavy_ram": true,                      // marque true SOMENTE se o projeto usa muita RAM (se não usa, false!)
+    "heavy_ssd": false,                     // marque true SOMENTE se o projeto usa muito disco/SSD
+    "reason": "Compilação ou simulação pesada",
+    "cpu_cores": 8,                         // limite definido pelo usuário (preservado no apply)
+    "ssd_percent": 60,                      // % máxima de banda do SSD (preservado no apply)
+    "max_ram_gb": 12.0                      // limite máximo de RAM em GB (preservado no apply)
+  },
+
   // === ÁREA DINÂMICA LIVRE (`ui`: array recursivo de `UiNode`) ===
   "ui": []
 }

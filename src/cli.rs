@@ -1,17 +1,27 @@
-use crate::model::parse_and_validate_json;
+use crate::client;
+use crate::model::{parse_and_validate_json, PanoramaAgentConfig};
 use crate::schema::SCHEMA_SPEC;
 use crate::store::{
-    apply_project_json, init_project, load_all_projects, resolve_projects_dir, InitOptions,
+    apply_project_json, delete_project, init_project, load_all_projects, move_project_in_order,
+    project_file_path, read_project_file, resolve_projects_dir, set_project_archived,
+    update_project_hardware, InitOptions,
 };
+use crate::traycer_bridge::pick_default_model;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Command {
     Gui,
+    Help,
+    Version,
     Schema,
-    List,
+    List {
+        all: bool,
+        archived_only: bool,
+    },
+    Models,
     Init {
         slug: String,
         title: String,
@@ -19,6 +29,10 @@ pub enum Command {
         progresso: f64,
         confianca: f64,
         phase: String,
+        harness: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        no_agent: bool,
     },
     Apply {
         slug: String,
@@ -27,94 +41,177 @@ pub enum Command {
     Validate {
         file: String,
     },
-    Help,
-    Version,
+    Archive {
+        slug: String,
+    },
+    Unarchive {
+        slug: String,
+    },
+    Delete {
+        slug: String,
+        yes: bool,
+    },
+    Move {
+        slug: String,
+        up: bool,
+    },
+    Update {
+        slug: String,
+    },
+    Limits {
+        slug: String,
+        cpu_cores: Option<u32>,
+        ssd_percent: Option<u32>,
+        max_ram_gb: Option<f64>,
+        clear: bool,
+    },
 }
 
 pub fn usage_text() -> &'static str {
-    "\
-Claude Panorama (`claude-panorama` / `panorama`) — Painel Nativo GNOME + CLI
-
-USO:
-  claude-panorama                Abre o aplicativo nativo GNOME (GTK4 / Libadwaita)
-  panorama gui                   Abre o aplicativo nativo GNOME (GTK4 / Libadwaita)
-  panorama schema                Imprime a especificação JSON completa e exemplos de `UiNode`
-  panorama list                  Lista projetos registrados com progresso, confiança e timestamp
-  panorama init <slug> --title \"...\" [--path \"...\"] [--progresso 0] [--confianca 50] [--phase \"...\"]
-  panorama apply <slug> [arquivo.json | -]
-                                 Valida JSON (arquivo ou stdin), anexa ponto em `history` e grava atomicamente
-  panorama validate <arquivo.json>
-                                 Valida sintaxe, tipos, faixas e referências de um arquivo JSON
-  panorama --help | -h           Exibe esta ajuda
-
-VARIÁVEIS DE AMBIENTE:
-  CLAUDE_PANORAMA_DIR            Sobrescreve `/home/sacer/.local/share/claude-panorama/projects`
-"
+    concat!(
+        "Claude Panorama — Painel nativo GNOME + CLI de acompanhamento de projetos\n\n",
+        "USO:\n",
+        "  claude-panorama                            Abre a interface gráfica GNOME\n",
+        "  panorama gui                               Abre a interface gráfica GNOME\n",
+        "  panorama schema                            Imprime a especificação JSON completa\n",
+        "  panorama list [--all | --archived]         Lista projetos (ativos por padrão)\n",
+        "  panorama models                            Lista harnesses e modelos do Traycer\n",
+        "  panorama init <slug> --title \"...\" [opções] Cria projeto + inicia agente dedicado\n",
+        "  panorama apply <slug> [arquivo.json | -]   Valida e grava JSON atomicamente\n",
+        "  panorama validate <arquivo.json | ->       Valida um JSON sem salvar\n",
+        "  panorama update <slug>                     Pede ao agente dedicado para atualizar\n",
+        "  panorama archive <slug>                    Arquiva o projeto\n",
+        "  panorama unarchive <slug>                  Restaura um projeto arquivado\n",
+        "  panorama delete <slug> --yes               Deleta permanentemente o projeto\n",
+        "  panorama move <slug> --up | --down         Altera a ordem do projeto na lista\n",
+        "  panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]\n",
+        "                                             Configura limites reais de hardware\n",
+        "  panorama --help | --version\n\n",
+        "OPÇÕES DE `init`:\n",
+        "  --title \"Nome do Projeto\"                  (obrigatório)\n",
+        "  --path \"/caminho/do/repo\"                  Caminho do repositório\n",
+        "  --progresso <0..100>                       Valor inicial (padrão: 0)\n",
+        "  --confianca <0..100>                       Valor inicial (padrão: 50)\n",
+        "  --phase \"Fase atual\"                       Etapa inicial\n",
+        "  --harness <id>                             Harness Traycer do agente dedicado\n",
+        "  --model <id>                               Modelo Traycer do agente dedicado\n",
+        "  --reasoning-effort <nivel>                 Esforço de raciocínio (se suportado)\n",
+        "  --no-agent                                 Apenas cria o JSON sem iniciar agente\n",
+    )
 }
 
 pub fn parse_cli_args(args: &[String]) -> Result<Command, String> {
     if args.is_empty() {
         return Ok(Command::Gui);
     }
+
     match args[0].as_str() {
-        "gui" => {
-            if args.len() > 1 {
-                return Err(format!(
-                    "`panorama gui` não aceita argumentos extras (recebido `{}`).",
-                    args[1]
-                ));
-            }
-            Ok(Command::Gui)
-        }
+        "gui" => Ok(Command::Gui),
+        "-h" | "--help" | "help" => Ok(Command::Help),
+        "-V" | "--version" | "version" => Ok(Command::Version),
         "schema" => Ok(Command::Schema),
-        "list" | "ls" => Ok(Command::List),
-        "help" | "--help" | "-h" => Ok(Command::Help),
-        "version" | "--version" | "-V" => Ok(Command::Version),
+        "models" => Ok(Command::Models),
+        "list" | "ls" => parse_list_args(&args[1..]),
         "init" => parse_init_args(&args[1..]),
         "apply" => parse_apply_args(&args[1..]),
         "validate" => {
             if args.len() != 2 {
-                return Err("Uso: `panorama validate <arquivo.json>`".to_string());
+                return Err("Uso: `panorama validate <arquivo.json | ->`".to_string());
             }
             Ok(Command::Validate {
                 file: args[1].clone(),
             })
         }
+        "archive" => {
+            if args.len() != 2 {
+                return Err("Uso: `panorama archive <slug>`".to_string());
+            }
+            Ok(Command::Archive {
+                slug: args[1].clone(),
+            })
+        }
+        "unarchive" => {
+            if args.len() != 2 {
+                return Err("Uso: `panorama unarchive <slug>`".to_string());
+            }
+            Ok(Command::Unarchive {
+                slug: args[1].clone(),
+            })
+        }
+        "delete" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("Uso: `panorama delete <slug> --yes`".to_string());
+            }
+            let slug = args[1].clone();
+            let yes = args.get(2).map(|s| s == "--yes" || s == "-y").unwrap_or(false);
+            Ok(Command::Delete { slug, yes })
+        }
+        "move" => {
+            if args.len() != 3 {
+                return Err("Uso: `panorama move <slug> --up | --down`".to_string());
+            }
+            let slug = args[1].clone();
+            let up = match args[2].as_str() {
+                "--up" | "up" => true,
+                "--down" | "down" => false,
+                other => return Err(format!("Direção inválida em `move`: `{other}` (use `--up` ou `--down`)")),
+            };
+            Ok(Command::Move { slug, up })
+        }
+        "update" | "refresh" => {
+            if args.len() != 2 {
+                return Err("Uso: `panorama update <slug>`".to_string());
+            }
+            Ok(Command::Update {
+                slug: args[1].clone(),
+            })
+        }
+        "limits" => parse_limits_args(&args[1..]),
         other => Err(format!(
-            "Subcomando desconhecido `{other}`.\n\n{}",
-            usage_text()
+            "Subcomando desconhecido `{other}`. Execute `panorama --help`."
         )),
     }
 }
 
+fn parse_list_args(rest: &[String]) -> Result<Command, String> {
+    let mut all = false;
+    let mut archived_only = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--all" | "-a" => all = true,
+            "--archived" => archived_only = true,
+            other => return Err(format!("Opção desconhecida em `list`: `{other}`")),
+        }
+    }
+    Ok(Command::List { all, archived_only })
+}
+
 fn parse_init_args(rest: &[String]) -> Result<Command, String> {
     if rest.is_empty() {
-        return Err(
-            "Uso: `panorama init <slug> --title \"...\" [--path \"...\"] [--progresso 0] [--confianca 50] [--phase \"...\"]`"
-                .to_string(),
-        );
+        return Err("Uso: `panorama init <slug> --title \"...\" [--path \"...\"]`".to_string());
     }
     let slug = rest[0].clone();
-    if slug.starts_with('-') {
-        return Err("Informe `<slug>` como primeiro argumento de `panorama init`.".to_string());
-    }
-
     let mut title: Option<String> = None;
     let mut path = String::new();
     let mut progresso = 0.0_f64;
     let mut confianca = 50.0_f64;
-    let mut phase = "Inicialização".to_string();
+    let mut phase = String::new();
+    let mut harness: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut reasoning_effort: Option<String> = None;
+    let mut no_agent = false;
+
+    let next_val = |idx: usize, flag: &str| -> Result<String, String> {
+        rest.get(idx + 1)
+            .cloned()
+            .ok_or_else(|| format!("Falta valor após `{flag}`"))
+    };
 
     let mut i = 1;
     while i < rest.len() {
         let flag = rest[i].as_str();
-        let next_val = |idx: usize, name: &str| -> Result<String, String> {
-            rest.get(idx + 1)
-                .cloned()
-                .ok_or_else(|| format!("A opção `{name}` exige um valor."))
-        };
         match flag {
-            "--title" | "-t" => {
+            "--title" => {
                 title = Some(next_val(i, flag)?);
                 i += 2;
             }
@@ -140,6 +237,22 @@ fn parse_init_args(rest: &[String]) -> Result<Command, String> {
                 phase = next_val(i, flag)?;
                 i += 2;
             }
+            "--harness" => {
+                harness = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--model" => {
+                model = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--reasoning-effort" | "--effort" => {
+                reasoning_effort = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--no-agent" => {
+                no_agent = true;
+                i += 1;
+            }
             unknown => {
                 return Err(format!("Opção desconhecida em `panorama init`: `{unknown}`"));
             }
@@ -157,6 +270,10 @@ fn parse_init_args(rest: &[String]) -> Result<Command, String> {
         progresso,
         confianca,
         phase,
+        harness,
+        model,
+        reasoning_effort,
+        no_agent,
     })
 }
 
@@ -167,6 +284,67 @@ fn parse_apply_args(rest: &[String]) -> Result<Command, String> {
     let slug = rest[0].clone();
     let source = rest.get(1).cloned();
     Ok(Command::Apply { slug, source })
+}
+
+fn parse_limits_args(rest: &[String]) -> Result<Command, String> {
+    if rest.is_empty() {
+        return Err("Uso: `panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]`".to_string());
+    }
+    let slug = rest[0].clone();
+    let mut cpu_cores = None;
+    let mut ssd_percent = None;
+    let mut max_ram_gb = None;
+    let mut clear = false;
+
+    let next_val = |idx: usize, flag: &str| -> Result<String, String> {
+        rest.get(idx + 1)
+            .cloned()
+            .ok_or_else(|| format!("Falta valor após `{flag}`"))
+    };
+
+    let mut i = 1;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        match flag {
+            "--cpu" => {
+                let raw = next_val(i, flag)?;
+                cpu_cores = Some(
+                    raw.parse::<u32>()
+                        .map_err(|_| format!("Valor inválido em `--cpu`: `{raw}`"))?,
+                );
+                i += 2;
+            }
+            "--ssd" => {
+                let raw = next_val(i, flag)?;
+                ssd_percent = Some(
+                    raw.parse::<u32>()
+                        .map_err(|_| format!("Valor inválido em `--ssd`: `{raw}`"))?,
+                );
+                i += 2;
+            }
+            "--ram" => {
+                let raw = next_val(i, flag)?;
+                max_ram_gb = Some(
+                    raw.parse::<f64>()
+                        .map_err(|_| format!("Valor inválido em `--ram`: `{raw}`"))?,
+                );
+                i += 2;
+            }
+            "--clear" => {
+                clear = true;
+                i += 1;
+            }
+            unknown => return Err(format!("Opção desconhecida em `limits`: `{unknown}`")),
+        }
+    }
+
+    Ok(Command::Limits {
+        slug,
+        cpu_cores,
+        ssd_percent,
+        max_ram_gb,
+        clear,
+    })
 }
 
 pub fn execute_non_gui(cmd: Command) -> Result<String, String> {
@@ -180,28 +358,63 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
         Command::Help => Ok(usage_text().to_string()),
         Command::Version => Ok(format!("claude-panorama {}", env!("CARGO_PKG_VERSION"))),
         Command::Schema => Ok(SCHEMA_SPEC.to_string()),
-        Command::List => {
+        Command::Models => {
+            let catalog = client::list_traycer_models(true)?;
+            let mut out = String::new();
+            for h in &catalog.harnesses {
+                out.push_str(&format!("[{}] {}\n", h.id, h.label));
+                for m in &h.models {
+                    let eff = if m.reasoning_efforts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (esforços: {})", m.reasoning_efforts.join(", "))
+                    };
+                    out.push_str(&format!("  - {}{}\n", m.id, eff));
+                }
+            }
+            if out.is_empty() {
+                out.push_str("Nenhum modelo retornado pelo Traycer.\n");
+            }
+            Ok(out)
+        }
+        Command::List { all, archived_only } => {
             let loaded = load_all_projects(dir);
-            if loaded.projects.is_empty() && loaded.errors.is_empty() {
+            let filtered: Vec<_> = loaded
+                .projects
+                .iter()
+                .filter(|p| {
+                    if archived_only {
+                        p.archived
+                    } else if all {
+                        true
+                    } else {
+                        !p.archived
+                    }
+                })
+                .collect();
+
+            if filtered.is_empty() && loaded.errors.is_empty() {
                 return Ok(format!(
-                    "Nenhum projeto registrado em `{}`.\nUse `panorama init <slug> --title \"...\"` ou `panorama apply <slug> arquivo.json`.",
+                    "Nenhum projeto encontrado em `{}`.",
                     dir.display()
                 ));
             }
             let mut out = String::new();
             out.push_str(&format!(
-                "{:<22} {:<11} {:>10} {:>10}  {:<25}  TÍTULO\n",
-                "SLUG", "STATUS", "PROGRESSO", "CONFIANÇA", "ATUALIZADO EM"
+                "{:<22} {:<11} {:>10} {:>10}  {:<8}  {:<22}  TÍTULO\n",
+                "SLUG", "STATUS", "PROGRESSO", "CONFIANÇA", "ESTADO", "ATUALIZADO EM"
             ));
-            out.push_str(&"-".repeat(104));
+            out.push_str(&"-".repeat(114));
             out.push('\n');
-            for p in &loaded.projects {
+            for p in filtered {
+                let st_label = if p.archived { "arquiv." } else { "ativo" };
                 out.push_str(&format!(
-                    "{:<22} {:<11} {:>9.1}% {:>9.1}%  {:<25}  {}\n",
+                    "{:<22} {:<11} {:>9.1}% {:>9.1}%  {:<8}  {:<22}  {}\n",
                     p.slug,
                     p.status.label(),
                     p.progresso,
                     p.confianca,
+                    st_label,
                     if p.updated_at.is_empty() {
                         "—"
                     } else {
@@ -222,22 +435,95 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             progresso,
             confianca,
             phase,
+            harness,
+            model,
+            reasoning_effort,
+            no_agent,
         } => {
+            let initial_agent = match (&harness, &model) {
+                (Some(h), Some(m)) => Some(PanoramaAgentConfig {
+                    agent_id: None,
+                    epic_id: None,
+                    harness_id: h.clone(),
+                    model: m.clone(),
+                    reasoning_effort: reasoning_effort.clone(),
+                    last_requested_at: None,
+                    last_status: None,
+                }),
+                _ => None,
+            };
             let written = init_project(
                 dir,
                 InitOptions {
                     slug: slug.clone(),
-                    title,
-                    path,
+                    title: title.clone(),
+                    path: path.clone(),
                     progresso,
                     confianca,
                     phase,
+                    agent: initial_agent,
+                    hardware: None,
                 },
             )?;
-            Ok(format!(
+
+            let mut msg = format!(
                 "Projeto `{slug}` inicializado com sucesso em `{}`.",
                 written.display()
-            ))
+            );
+
+            if !no_agent {
+                let chosen = match (harness, model) {
+                    (Some(h), Some(m)) => Ok((h, m, reasoning_effort)),
+                    (h_opt, m_opt) => match client::list_traycer_models(false) {
+                        Ok(cat) => {
+                            if let Some(h) = h_opt {
+                                if let Some(hi) = cat.harnesses.iter().find(|x| x.id == h) {
+                                    let chosen_m = m_opt
+                                        .or_else(|| hi.models.first().map(|mm| mm.id.clone()))
+                                        .ok_or_else(|| format!("Harness `{h}` sem modelos."))?;
+                                    Ok((h, chosen_m, reasoning_effort))
+                                } else {
+                                    Err(format!("Harness `{h}` não encontrado no Traycer."))
+                                }
+                            } else {
+                                pick_default_model(&cat)
+                                    .ok_or_else(|| "Nenhum modelo disponível no Traycer.".to_string())
+                            }
+                        }
+                        Err(e) => Err(e),
+                    },
+                };
+
+                match chosen {
+                    Ok((h, m, eff)) => {
+                        match client::start_panorama_agent(
+                            dir,
+                            &slug,
+                            &title,
+                            &path,
+                            &h,
+                            &m,
+                            eff.as_deref(),
+                        ) {
+                            Ok(res) => {
+                                msg.push_str(&format!("\n{}", res.message));
+                            }
+                            Err(e) => {
+                                msg.push_str(&format!(
+                                    "\nAviso: JSON criado, mas não foi possível iniciar o agente dedicado ({e})."
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        msg.push_str(&format!(
+                            "\nAviso: JSON criado sem agente ativo ({e})."
+                        ));
+                    }
+                }
+            }
+
+            Ok(msg)
         }
         Command::Apply { slug, source } => {
             let raw = read_input_source(source.as_deref())?;
@@ -268,6 +554,99 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
                 doc.ui.len()
             ))
         }
+        Command::Archive { slug } => {
+            let doc = set_project_archived(dir, &slug, true)?;
+            let _ = client::remove_hardware_limits(&slug);
+            if let Some(ag) = &doc.agent {
+                if let Some(aid) = ag.agent_id.as_deref() {
+                    let _ = client::archive_traycer_agent(aid, ag.epic_id.as_deref(), true);
+                }
+            }
+            Ok(format!("Projeto `{slug}` arquivado."))
+        }
+        Command::Unarchive { slug } => {
+            let doc = set_project_archived(dir, &slug, false)?;
+            if let Some(ag) = &doc.agent {
+                if let Some(aid) = ag.agent_id.as_deref() {
+                    let _ = client::archive_traycer_agent(aid, ag.epic_id.as_deref(), false);
+                }
+            }
+            Ok(format!("Projeto `{slug}` restaurado para a lista ativa."))
+        }
+        Command::Delete { slug, yes } => {
+            if !yes {
+                return Err(format!(
+                    "Confirmação obrigatória: execute `panorama delete {slug} --yes` para deletar permanentemente."
+                ));
+            }
+            let _ = client::remove_hardware_limits(&slug);
+            delete_project(dir, &slug)?;
+            Ok(format!("Projeto `{slug}` deletado permanentemente."))
+        }
+        Command::Move { slug, up } => {
+            move_project_in_order(dir, &slug, up, None)?;
+            Ok(format!(
+                "Projeto `{slug}` movido para {}.",
+                if up { "cima" } else { "baixo" }
+            ))
+        }
+        Command::Update { slug } => {
+            let path = project_file_path(dir, &slug);
+            let doc = read_project_file(&path).map_err(|e| e.to_string())?;
+            let ag = doc.agent.as_ref();
+            let res = client::request_panorama_update(
+                dir,
+                &doc.slug,
+                &doc.title,
+                &doc.path,
+                ag.and_then(|a| a.agent_id.as_deref()),
+                ag.and_then(|a| a.epic_id.as_deref()),
+                ag.map(|a| a.harness_id.as_str()),
+                ag.map(|a| a.model.as_str()),
+                ag.and_then(|a| a.reasoning_effort.as_deref()),
+            )?;
+            Ok(res.message)
+        }
+        Command::Limits {
+            slug,
+            cpu_cores,
+            ssd_percent,
+            max_ram_gb,
+            clear,
+        } => {
+            let path = project_file_path(dir, &slug);
+            let doc = read_project_file(&path).map_err(|e| e.to_string())?;
+            let mut hw = doc.hardware.clone().unwrap_or_default();
+            if clear {
+                hw.cpu_cores = None;
+                hw.ssd_percent = None;
+                hw.max_ram_gb = None;
+            } else {
+                if let Some(c) = cpu_cores {
+                    hw.cpu_cores = Some(c);
+                }
+                if let Some(s) = ssd_percent {
+                    hw.ssd_percent = Some(s);
+                }
+                if let Some(r) = max_ram_gb {
+                    hw.max_ram_gb = Some(r);
+                }
+            }
+            let updated = update_project_hardware(dir, &slug, hw.clone())?;
+            let h = updated.hardware.unwrap_or_default();
+            if h.cpu_cores.is_some() || h.ssd_percent.is_some() || h.max_ram_gb.is_some() {
+                let _ = client::apply_hardware_limits(
+                    &slug,
+                    &doc.path,
+                    h.cpu_cores,
+                    h.ssd_percent,
+                    h.max_ram_gb,
+                );
+            } else {
+                let _ = client::remove_hardware_limits(&slug);
+            }
+            Ok(format!("Limites de hardware de `{slug}` atualizados."))
+        }
     }
 }
 
@@ -296,7 +675,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_parses_init_apply_validate_and_gui() {
+    fn cli_parses_init_apply_validate_and_new_commands() {
         assert_eq!(parse_cli_args(&[]).unwrap(), Command::Gui);
         assert_eq!(
             parse_cli_args(&["gui".to_string()]).unwrap(),
@@ -317,6 +696,7 @@ mod tests {
             "82".into(),
             "--phase".into(),
             "Fase 1".into(),
+            "--no-agent".into(),
         ])
         .unwrap();
         assert_eq!(
@@ -328,12 +708,34 @@ mod tests {
                 progresso: 15.5,
                 confianca: 82.0,
                 phase: "Fase 1".into(),
+                harness: None,
+                model: None,
+                reasoning_effort: None,
+                no_agent: true,
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&["archive".into(), "foo".into()]).unwrap(),
+            Command::Archive { slug: "foo".into() }
+        );
+        assert_eq!(
+            parse_cli_args(&["move".into(), "foo".into(), "--up".into()]).unwrap(),
+            Command::Move {
+                slug: "foo".into(),
+                up: true
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&["delete".into(), "foo".into(), "--yes".into()]).unwrap(),
+            Command::Delete {
+                slug: "foo".into(),
+                yes: true
             }
         );
     }
 
     #[test]
-    fn cli_end_to_end_init_list_validate() {
+    fn cli_end_to_end_init_list_archive_move_delete() {
         let tmp = std::env::temp_dir().join(format!(
             "panorama-cli-test-{}",
             std::process::id()
@@ -348,15 +750,44 @@ mod tests {
                 progresso: 20.0,
                 confianca: 75.0,
                 phase: "Onda 1".into(),
+                harness: None,
+                model: None,
+                reasoning_effort: None,
+                no_agent: true,
             },
             &tmp,
         )
         .expect("init ok");
         assert!(out_init.contains("alpha"));
 
-        let out_list = execute_non_gui_in_dir(Command::List, &tmp).expect("list ok");
+        let out_list = execute_non_gui_in_dir(
+            Command::List {
+                all: false,
+                archived_only: false,
+            },
+            &tmp,
+        )
+        .expect("list ok");
         assert!(out_list.contains("Alpha Core"));
         assert!(out_list.contains("20.0%"));
+
+        execute_non_gui_in_dir(
+            Command::Archive {
+                slug: "alpha".into(),
+            },
+            &tmp,
+        )
+        .expect("archive ok");
+
+        let out_active = execute_non_gui_in_dir(
+            Command::List {
+                all: false,
+                archived_only: false,
+            },
+            &tmp,
+        )
+        .expect("list active ok");
+        assert!(!out_active.contains("Alpha Core"));
 
         let json_path = tmp.join("alpha.json");
         let out_val = execute_non_gui_in_dir(
@@ -367,6 +798,16 @@ mod tests {
         )
         .expect("validate ok");
         assert!(out_val.contains("JSON válido"));
+
+        execute_non_gui_in_dir(
+            Command::Delete {
+                slug: "alpha".into(),
+                yes: true,
+            },
+            &tmp,
+        )
+        .expect("delete ok");
+        assert!(!json_path.exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }

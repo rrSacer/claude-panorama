@@ -203,6 +203,48 @@ pub struct HistoryPoint {
     pub note: String,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PanoramaAgentConfig {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub epic_id: Option<String>,
+    #[serde(default)]
+    pub harness_id: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub last_requested_at: Option<String>,
+    #[serde(default)]
+    pub last_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareConfig {
+    #[serde(default)]
+    pub heavy_cpu: Option<bool>,
+    #[serde(default)]
+    pub heavy_ram: Option<bool>,
+    #[serde(default)]
+    pub heavy_ssd: Option<bool>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
+    #[serde(default)]
+    pub ssd_percent: Option<u32>,
+    #[serde(default)]
+    pub max_ram_gb: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDocument {
@@ -247,6 +289,18 @@ pub struct ProjectDocument {
     /// Série histórica de progresso e confiança
     #[serde(default)]
     pub history: Vec<HistoryPoint>,
+
+    /// Se true, projeto está arquivado (oculto da lista principal até abrir Arquivados)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+
+    /// Agente dedicado no Traycer para montar, monitorar e atualizar este panorama
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<PanoramaAgentConfig>,
+
+    /// Perfil de uso pesado de hardware e limites em tempo real (CPU, SSD %, RAM)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<HardwareConfig>,
 
     /// Área dinâmica livre construída pelo agente
     #[serde(default)]
@@ -680,6 +734,35 @@ impl ProjectDocument {
         for (idx, hp) in self.history.iter().enumerate() {
             validate_percent(&format!("history[{idx}].progresso"), hp.progresso)?;
             validate_percent(&format!("history[{idx}].confianca"), hp.confianca)?;
+        }
+        if let Some(hw) = &self.hardware {
+            if let Some(cores) = hw.cpu_cores {
+                if cores == 0 {
+                    return Err(ValidationError {
+                        message: "`hardware.cpu_cores` deve ser >= 1".to_string(),
+                        line: None,
+                        column: None,
+                    });
+                }
+            }
+            if let Some(ssd) = hw.ssd_percent {
+                if ssd == 0 || ssd > 100 {
+                    return Err(ValidationError {
+                        message: format!("`hardware.ssd_percent` deve estar entre 1 e 100 (recebido {ssd})"),
+                        line: None,
+                        column: None,
+                    });
+                }
+            }
+            if let Some(ram) = hw.max_ram_gb {
+                if !ram.is_finite() || ram <= 0.0 {
+                    return Err(ValidationError {
+                        message: format!("`hardware.max_ram_gb` deve ser positivo e finito (recebido {ram})"),
+                        line: None,
+                        column: None,
+                    });
+                }
+            }
         }
         for (idx, node) in self.ui.iter().enumerate() {
             validate_ui_node(node, &format!("ui[{idx}]"))?;
@@ -1254,5 +1337,37 @@ mod tests {
         }"#;
         let err = parse_and_validate_json(raw).expect_err("must reject missing node ref");
         assert!(err.message.contains("inexistente"));
+    }
+
+    #[test]
+    fn agent_and_hardware_fields_parse_and_validate() {
+        let raw = r#"{
+            "title": "Rust App",
+            "progresso": 40.0,
+            "confianca": 80.0,
+            "archived": true,
+            "agent": {
+                "agent_id": "ag-1",
+                "epic_id": "ep-1",
+                "harness_id": "antigravity",
+                "model": "gemini-4-hydrogen",
+                "reasoning_effort": "high"
+            },
+            "hardware": {
+                "heavy_cpu": true,
+                "heavy_ram": true,
+                "heavy_ssd": true,
+                "cpu_cores": 6,
+                "ssd_percent": 50,
+                "max_ram_gb": 12.0
+            }
+        }"#;
+        let doc = parse_and_validate_json(raw).expect("valid doc");
+        assert!(doc.archived);
+        assert_eq!(doc.agent.as_ref().unwrap().model, "gemini-4-hydrogen");
+        assert_eq!(doc.hardware.as_ref().unwrap().cpu_cores, Some(6));
+
+        let bad_ssd = r#"{"title":"X","hardware":{"ssd_percent":150}}"#;
+        assert!(parse_and_validate_json(bad_ssd).is_err());
     }
 }
