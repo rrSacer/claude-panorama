@@ -77,14 +77,27 @@ fn main() {
 
                 let desired = proj.hardware.as_ref();
                 let cpu_cores = desired.and_then(|h| h.cpu_cores);
+                let cpu_threads = desired
+                    .and_then(|h| h.cpu_threads.clone())
+                    .map(|mut v| {
+                        v.retain(|&c| c < hw.specs.total_cpus);
+                        v.sort_unstable();
+                        v.dedup();
+                        v
+                    })
+                    .filter(|v| !v.is_empty());
                 let ssd_percent = desired.and_then(|h| h.ssd_percent);
                 let max_ram_gb = desired.and_then(|h| h.max_ram_gb);
-                let has_desired = cpu_cores.is_some() || ssd_percent.is_some() || max_ram_gb.is_some();
+                let has_desired = cpu_cores.is_some()
+                    || cpu_threads.is_some()
+                    || ssd_percent.is_some()
+                    || max_ram_gb.is_some();
 
                 let needs_sync = match hw.tracked.get(&proj.slug) {
                     Some(cur) => {
                         cur.path != proj.path
                             || cur.cpu_cores != cpu_cores
+                            || cur.cpu_threads != cpu_threads
                             || cur.ssd_percent != ssd_percent
                             || cur.max_ram_gb != max_ram_gb
                     }
@@ -97,6 +110,7 @@ fn main() {
                             &proj.slug,
                             &proj.path,
                             cpu_cores,
+                            cpu_threads,
                             ssd_percent,
                             max_ram_gb,
                         );
@@ -285,10 +299,11 @@ fn dispatch_request(req: DaemonRequest, ctx: &DaemonCtx) -> DaemonResponse {
             slug,
             path,
             cpu_cores,
+            cpu_threads,
             ssd_percent,
             max_ram_gb,
         } => match ctx.hw.lock() {
-            Ok(mut hw) => match hw.set_limits(&slug, &path, cpu_cores, ssd_percent, max_ram_gb) {
+            Ok(mut hw) => match hw.set_limits(&slug, &path, cpu_cores, cpu_threads, ssd_percent, max_ram_gb) {
                 Ok(()) => DaemonResponse::Ok,
                 Err(message) => DaemonResponse::Error { message },
             },

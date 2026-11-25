@@ -98,7 +98,8 @@ Binários em `/home/sacer/.local/bin/`.
 - `panorama archive <slug>` / `panorama unarchive <slug>`: arquiva ou restaura o projeto.
 - `panorama delete <slug> --yes`: remove permanentemente o projeto.
 - `panorama move <slug> --up | --down`: reordena o projeto na lista lateral.
-- `panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]`: define limites reais de hardware (CPU/SSD/RAM) via cgroups v2.
+- `panorama edit <slug> [--title "..."] [--icon <imagem|nome>] [--reset-icon]`: altera o nome exibido e/ou a imagem de ícone do projeto (preservados em futuras atualizações).
+- `panorama limits <slug> [--cpus 0,1,6,7] [--cpu N] [--ssd %] [--ram GB] [--clear]`: define limites reais de hardware (núcleos/threads específicos, SSD e RAM) via cgroups v2.
 
 ### Campo `hardware` (Limites Seletivos)
 Marque `heavy_cpu`, `heavy_ram` e `heavy_ssd` no JSON **somente** para os recursos em que o projeto realmente consome muito hardware (ex.: Rust usa muita CPU, RAM e SSD; projetos leves deixam todos `false`; se não usa muita RAM, deixe `heavy_ram: false`). A interface só exibe os controles para o que está marcado como pesado.

@@ -24,7 +24,7 @@ Regras obrigatórias de conteúdo (leia `AGENT_INSTRUCTIONS.md` do projeto claud
   "title": "Nome Real do Projeto",          // OBRIGATÓRIO
   "subtitle": "O que o projeto é, numa frase simples", // opcional
   "path": "/caminho/absoluto/do/repo",      // opcional
-  "icon": "applications-engineering-symbolic", // opcional (qualquer ícone simbólico GNOME)
+  "icon": "applications-engineering-symbolic", // opcional (ícone simbólico GNOME ou caminho de imagem PNG/JPG/WebP/SVG)
   "status": "ativo",                        // "ativo" | "validando" | "pausado" | "concluido" | "bloqueado"
   "phase": "Onda 0 — Integridade de Save",  // fase atual exibida no cabeçalho fixo
   "updated_at": "2026-11-07T21:45:00-03:00",// atualizado automaticamente no `panorama apply`
@@ -66,7 +66,7 @@ Regras obrigatórias de conteúdo (leia `AGENT_INSTRUCTIONS.md` do projeto claud
     "heavy_ram": true,                      // marque true SOMENTE se o projeto usa muita RAM (se não usa, false!)
     "heavy_ssd": false,                     // marque true SOMENTE se o projeto usa muito disco/SSD
     "reason": "Compilação ou simulação pesada",
-    "cpu_cores": 8,                         // limite definido pelo usuário (preservado no apply)
+    "cpu_threads": [0, 1, 6, 7],            // threads/núcleos específicos selecionados pelo usuário (preservado no apply)
     "ssd_percent": 60,                      // % máxima de banda do SSD (preservado no apply)
     "max_ram_gb": 12.0                      // limite máximo de RAM em GB (preservado no apply)
   },

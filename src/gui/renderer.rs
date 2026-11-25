@@ -3,7 +3,8 @@ use crate::gui::charts::{
     build_ring_gauge, build_sparkline, build_step_marker, GaugeKind,
 };
 use crate::hardware::{
-    detect_project_hardware, LiveHardwareStats, SystemHardwareSpecs,
+    detect_project_hardware, format_cpu_ranges, CpuCoreInfo, LiveHardwareStats,
+    SystemHardwareSpecs,
 };
 use crate::ipc::TraycerCatalog;
 use crate::model::{
@@ -16,7 +17,9 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use gtk4::gio;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::f64::consts::TAU;
 use std::rc::Rc;
 
@@ -29,6 +32,7 @@ pub struct ProjectViewCallbacks {
     pub on_request_update: Rc<dyn Fn()>,
     pub on_refresh_models: Rc<dyn Fn()>,
     pub on_hardware_changed: Rc<dyn Fn(HardwareConfig)>,
+    pub on_edit_project: Rc<dyn Fn()>,
 }
 
 #[derive(Default, Clone)]
@@ -67,10 +71,12 @@ impl LiveHardwareWidgets {
             }
         }
         if let (Some(lbl), Some(bar)) = (&self.cpu_live_lbl, &self.cpu_bar) {
-            let approx_cores = (stats.cpu_percent / 100.0) * (specs.total_cpus as f64);
+            let total_t = specs.total_cpus.max(1);
+            let phys_c = specs.physical_cores.len().max(1);
+            let approx_threads = (stats.cpu_percent / 100.0) * (total_t as f64);
             lbl.set_text(&format!(
-                "Uso atual: {:.1}% (~{:.1} de {} núcleos)",
-                stats.cpu_percent, approx_cores, specs.total_cpus
+                "Uso atual: {:.1}% (~{:.1}/{} threads · {} núcleos)",
+                stats.cpu_percent, approx_threads, total_t, phys_c
             ));
             bar.set_fraction((stats.cpu_percent / 100.0).clamp(0.0, 1.0));
         }
@@ -114,7 +120,7 @@ pub fn render_project_view(
     root.set_margin_end(18);
 
     // 1. Faixa de identificação do projeto
-    root.append(&build_project_banner(doc));
+    root.append(&build_project_banner(doc, callbacks.on_edit_project.clone()));
 
     // 2. Painel do Agente Dedicado + Limites Seletivos de Hardware em Tempo Real
     root.append(&build_dedicated_agent_card(doc, callbacks));
@@ -544,6 +550,7 @@ fn build_selective_hardware_card(
             doc.hardware.as_ref().map(|h| h.reason.clone()).unwrap_or_default()
         },
         cpu_cores: doc.hardware.as_ref().and_then(|h| h.cpu_cores),
+        cpu_threads: doc.hardware.as_ref().and_then(|h| h.cpu_threads.clone()),
         ssd_percent: doc.hardware.as_ref().and_then(|h| h.ssd_percent),
         max_ram_gb: doc.hardware.as_ref().and_then(|h| h.max_ram_gb),
     }));
@@ -559,28 +566,61 @@ fn build_selective_hardware_card(
 
     let grid = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
 
-    // 1. CPU (apenas se o projeto usa muita CPU)
+    // 1. CPU — seleção específica de núcleos físicos e threads (apenas se usa muita CPU)
     if needs.show_cpu {
-        let total = callbacks.hw_specs.total_cpus.max(1) as f64;
-        let default_cores = ((total * 0.75).round() as u32).max(1);
-        let init_enabled = hw_state.borrow().cpu_cores.is_some();
-        let init_val = hw_state.borrow().cpu_cores.unwrap_or(default_cores) as f64;
+        let cores_topo: Vec<CpuCoreInfo> = if callbacks.hw_specs.physical_cores.is_empty() {
+            (0..callbacks.hw_specs.total_cpus.max(1))
+                .map(|i| CpuCoreInfo {
+                    core_id: i,
+                    threads: vec![i],
+                })
+                .collect()
+        } else {
+            callbacks.hw_specs.physical_cores.clone()
+        };
 
-        let (row_widget, live_lbl, bar) = build_hw_slider_row(
-            "Núcleos de CPU",
+        let init_enabled = hw_state
+            .borrow()
+            .cpu_threads
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            || hw_state.borrow().cpu_cores.is_some();
+
+        let init_threads: Vec<u32> = if let Some(ts) = hw_state
+            .borrow()
+            .cpu_threads
+            .as_ref()
+            .filter(|v| !v.is_empty())
+        {
+            ts.clone()
+        } else if let Some(c) = hw_state.borrow().cpu_cores {
+            (0..c.clamp(1, callbacks.hw_specs.total_cpus.max(1))).collect()
+        } else {
+            let take_cores = ((cores_topo.len() * 2) / 3).max(1).min(cores_topo.len());
+            cores_topo
+                .iter()
+                .take(take_cores)
+                .flat_map(|c| c.threads.iter().copied())
+                .collect()
+        };
+
+        let (row_widget, live_lbl, bar) = build_cpu_topology_row(
+            &cores_topo,
+            callbacks.hw_specs.total_cpus.max(1),
             init_enabled,
-            1.0,
-            total,
-            1.0,
-            init_val,
-            0,
-            "núcleos",
+            &init_threads,
             {
                 let hw_state = hw_state.clone();
                 let on_change = callbacks.on_hardware_changed.clone();
-                move |enabled, val| {
+                move |enabled, threads| {
                     let mut st = hw_state.borrow_mut();
-                    st.cpu_cores = if enabled { Some(val.round() as u32) } else { None };
+                    if enabled && !threads.is_empty() {
+                        st.cpu_threads = Some(threads);
+                        st.cpu_cores = None;
+                    } else {
+                        st.cpu_threads = None;
+                        st.cpu_cores = None;
+                    }
                     on_change(st.clone());
                 }
             },
@@ -786,16 +826,383 @@ where
     (box_row.upcast(), live_lbl, bar)
 }
 
-fn build_project_banner(doc: &ProjectDocument) -> gtk4::Widget {
+fn build_cpu_topology_row<F>(
+    cores: &[CpuCoreInfo],
+    total_threads: u32,
+    initial_enabled: bool,
+    initial_threads: &[u32],
+    on_commit: F,
+) -> (gtk4::Widget, gtk4::Label, gtk4::ProgressBar)
+where
+    F: Fn(bool, Vec<u32>) + 'static,
+{
+    let box_row = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    box_row.add_css_class("hw-limit-row");
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let title_lbl = gtk4::Label::new(Some(&format!(
+        "Núcleos e Threads da CPU ({} núcleos · {} threads)",
+        cores.len(),
+        total_threads
+    )));
+    title_lbl.add_css_class("caption-heading");
+    title_lbl.set_xalign(0.0);
+    title_lbl.set_hexpand(true);
+    top.append(&title_lbl);
+
+    let live_lbl = gtk4::Label::new(Some("Aguardando leitura..."));
+    live_lbl.add_css_class("caption");
+    live_lbl.add_css_class("dim-label");
+    live_lbl.set_valign(gtk4::Align::Center);
+    top.append(&live_lbl);
+
+    let val_lbl = gtk4::Label::new(None);
+    val_lbl.add_css_class("mini-pill");
+    val_lbl.add_css_class(if initial_enabled { "pill-run" } else { "pill-pend" });
+    val_lbl.set_valign(gtk4::Align::Center);
+    top.append(&val_lbl);
+
+    let sw = gtk4::Switch::builder()
+        .active(initial_enabled)
+        .valign(gtk4::Align::Center)
+        .tooltip_text("Ativar/desativar afinidade de núcleos/threads em tempo real")
+        .build();
+    top.append(&sw);
+    box_row.append(&top);
+
+    let bar = gtk4::ProgressBar::new();
+    bar.add_css_class("panorama-linear-bar");
+    bar.set_hexpand(true);
+    box_row.append(&bar);
+
+    let selected: Rc<RefCell<BTreeSet<u32>>> = Rc::new(RefCell::new(
+        initial_threads
+            .iter()
+            .copied()
+            .filter(|&t| t < total_threads)
+            .collect(),
+    ));
+    if selected.borrow().is_empty() && !cores.is_empty() {
+        let mut s = selected.borrow_mut();
+        for &t in &cores[0].threads {
+            s.insert(t);
+        }
+    }
+
+    let cores_vec: Rc<Vec<CpuCoreInfo>> = Rc::new(cores.to_vec());
+    let format_summary = {
+        let cores_vec = cores_vec.clone();
+        move |enabled: bool, sel: &BTreeSet<u32>| -> String {
+            if !enabled {
+                return "Sem limite".to_string();
+            }
+            let active_cores = cores_vec
+                .iter()
+                .filter(|c| c.threads.iter().any(|t| sel.contains(t)))
+                .count();
+            let list: Vec<u32> = sel.iter().copied().collect();
+            let ranges = format_cpu_ranges(&list);
+            format!(
+                "{}/{} núcleos ({}T) · CPUs {}",
+                active_cores,
+                cores_vec.len(),
+                list.len(),
+                ranges
+            )
+        }
+    };
+    val_lbl.set_text(&format_summary(initial_enabled, &selected.borrow()));
+
+    let flow = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .min_children_per_line(2)
+        .max_children_per_line(6)
+        .homogeneous(true)
+        .column_spacing(6)
+        .row_spacing(6)
+        .hexpand(true)
+        .build();
+    flow.set_sensitive(initial_enabled);
+
+    struct CoreUiGroup {
+        core_btn: gtk4::ToggleButton,
+        threads: Vec<(u32, gtk4::ToggleButton)>,
+    }
+
+    let ui_groups: Rc<RefCell<Vec<CoreUiGroup>>> = Rc::new(RefCell::new(Vec::new()));
+    let syncing = Rc::new(Cell::new(false));
+    let on_commit = Rc::new(on_commit);
+    let debounce_id: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
+    let refresh_ui_buttons = {
+        let ui_groups = ui_groups.clone();
+        let cores_vec = cores_vec.clone();
+        let selected = selected.clone();
+        let syncing = syncing.clone();
+        let val_lbl = val_lbl.clone();
+        let sw = sw.clone();
+        let format_summary = format_summary.clone();
+        move || {
+            syncing.set(true);
+            let sel = selected.borrow();
+            let groups = ui_groups.borrow();
+            for (core, grp) in cores_vec.iter().zip(groups.iter()) {
+                let any_active = core.threads.iter().any(|t| sel.contains(t));
+                let all_active = !core.threads.is_empty() && core.threads.iter().all(|t| sel.contains(t));
+                grp.core_btn.set_active(any_active);
+                if any_active && !all_active {
+                    grp.core_btn.add_css_class("cpu-core-partial");
+                } else {
+                    grp.core_btn.remove_css_class("cpu-core-partial");
+                }
+                for (tid, tbtn) in &grp.threads {
+                    tbtn.set_active(sel.contains(tid));
+                }
+            }
+            val_lbl.set_text(&format_summary(sw.is_active(), &sel));
+            syncing.set(false);
+        }
+    };
+
+    let schedule_commit = {
+        let on_commit = on_commit.clone();
+        let debounce_id = debounce_id.clone();
+        let selected = selected.clone();
+        let sw = sw.clone();
+        move |immediate: bool| {
+            if let Some(id) = debounce_id.borrow_mut().take() {
+                id.remove();
+            }
+            let active = sw.is_active();
+            let list: Vec<u32> = selected.borrow().iter().copied().collect();
+            if immediate {
+                on_commit(active, list);
+            } else {
+                let on_commit = on_commit.clone();
+                let debounce_id_inner = debounce_id.clone();
+                let src = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(140),
+                    move || {
+                        *debounce_id_inner.borrow_mut() = None;
+                        on_commit(active, list);
+                    },
+                );
+                *debounce_id.borrow_mut() = Some(src);
+            }
+        }
+    };
+
+    for core in cores {
+        let cell = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        cell.add_css_class("cpu-core-card");
+
+        let core_btn = gtk4::ToggleButton::with_label(&format!("Núcleo {}", core.core_id));
+        core_btn.add_css_class("cpu-core-btn");
+        core_btn.set_hexpand(true);
+        let thread_list_txt = core
+            .threads
+            .iter()
+            .map(|t| format!("T{t}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        core_btn.set_tooltip_text(Some(&format!(
+            "Alternar Núcleo {} ({thread_list_txt})",
+            core.core_id
+        )));
+        cell.append(&core_btn);
+
+        let mut thread_btns = Vec::new();
+        if core.threads.len() > 1 {
+            let trow = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+            trow.set_homogeneous(true);
+            for &tid in &core.threads {
+                let tb = gtk4::ToggleButton::with_label(&format!("T{tid}"));
+                tb.add_css_class("cpu-thread-btn");
+                tb.set_tooltip_text(Some(&format!(
+                    "Thread lógica {tid} (Núcleo {})",
+                    core.core_id
+                )));
+                {
+                    let syncing = syncing.clone();
+                    let selected = selected.clone();
+                    let refresh_ui_buttons = refresh_ui_buttons.clone();
+                    let schedule_commit = schedule_commit.clone();
+                    tb.connect_toggled(move |btn| {
+                        if syncing.get() {
+                            return;
+                        }
+                        let want = btn.is_active();
+                        {
+                            let mut sel = selected.borrow_mut();
+                            if want {
+                                sel.insert(tid);
+                            } else if sel.len() > 1 {
+                                sel.remove(&tid);
+                            }
+                        }
+                        refresh_ui_buttons();
+                        schedule_commit(false);
+                    });
+                }
+                trow.append(&tb);
+                thread_btns.push((tid, tb));
+            }
+            cell.append(&trow);
+        }
+
+        {
+            let syncing = syncing.clone();
+            let selected = selected.clone();
+            let core_threads = core.threads.clone();
+            let refresh_ui_buttons = refresh_ui_buttons.clone();
+            let schedule_commit = schedule_commit.clone();
+            core_btn.connect_toggled(move |btn| {
+                if syncing.get() {
+                    return;
+                }
+                let want = btn.is_active();
+                {
+                    let mut sel = selected.borrow_mut();
+                    if want {
+                        for &t in &core_threads {
+                            sel.insert(t);
+                        }
+                    } else {
+                        let remaining = sel.iter().filter(|t| !core_threads.contains(t)).count();
+                        if remaining > 0 {
+                            for t in &core_threads {
+                                sel.remove(t);
+                            }
+                        }
+                    }
+                }
+                refresh_ui_buttons();
+                schedule_commit(false);
+            });
+        }
+
+        ui_groups.borrow_mut().push(CoreUiGroup {
+            core_btn,
+            threads: thread_btns,
+        });
+
+        let fc = gtk4::FlowBoxChild::builder()
+            .focusable(false)
+            .child(&cell)
+            .build();
+        flow.append(&fc);
+    }
+
+    refresh_ui_buttons();
+    box_row.append(&flow);
+
+    {
+        let flow = flow.clone();
+        let val_lbl = val_lbl.clone();
+        let format_summary = format_summary.clone();
+        let selected = selected.clone();
+        let schedule_commit = schedule_commit.clone();
+        sw.connect_state_set(move |_, active| {
+            flow.set_sensitive(active);
+            val_lbl.remove_css_class("pill-run");
+            val_lbl.remove_css_class("pill-pend");
+            val_lbl.add_css_class(if active { "pill-run" } else { "pill-pend" });
+            val_lbl.set_text(&format_summary(active, &selected.borrow()));
+            schedule_commit(true);
+            glib::Propagation::Proceed
+        });
+    }
+
+    (box_row.upcast(), live_lbl, bar)
+}
+
+pub fn resolve_icon_image_path(icon_spec: &str) -> Option<PathBuf> {
+    let trimmed = icon_spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_str = if let Some(rest) = trimmed.strip_prefix("file://") {
+        rest.to_string()
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            format!("{home}/{rest}")
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+    let looks_like_path = path_str.contains('/')
+        || path_str.ends_with(".png")
+        || path_str.ends_with(".jpg")
+        || path_str.ends_with(".jpeg")
+        || path_str.ends_with(".webp")
+        || path_str.ends_with(".svg")
+        || path_str.ends_with(".ico");
+    if !looks_like_path {
+        return None;
+    }
+    let p = Path::new(&path_str);
+    if p.is_file() {
+        Some(p.to_path_buf())
+    } else {
+        None
+    }
+}
+
+pub fn build_project_icon_widget(icon_spec: &str, size: i32, accent_fallback: bool) -> gtk4::Widget {
+    if let Some(img_path) = resolve_icon_image_path(icon_spec) {
+        let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        frame.set_size_request(size, size);
+        frame.set_halign(gtk4::Align::Center);
+        frame.set_valign(gtk4::Align::Center);
+        frame.set_overflow(gtk4::Overflow::Hidden);
+        frame.add_css_class("project-icon-frame");
+
+        let gfile = gio::File::for_path(&img_path);
+        let pic = gtk4::Picture::for_file(&gfile);
+        pic.set_content_fit(gtk4::ContentFit::Cover);
+        pic.set_can_shrink(true);
+        pic.set_size_request(size, size);
+        pic.set_hexpand(true);
+        pic.set_vexpand(true);
+        frame.append(&pic);
+        return frame.upcast();
+    }
+
+    let name = if icon_spec.trim().is_empty() || icon_spec.contains('/') {
+        "applications-engineering-symbolic"
+    } else {
+        icon_spec.trim()
+    };
+    let icon = gtk4::Image::from_icon_name(name);
+    icon.set_pixel_size(size);
+    icon.set_valign(gtk4::Align::Center);
+    if accent_fallback {
+        icon.add_css_class("accent");
+    }
+    icon.upcast()
+}
+
+fn build_project_banner(doc: &ProjectDocument, on_edit: Rc<dyn Fn()>) -> gtk4::Widget {
     let banner = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
     banner.add_css_class("card");
     banner.add_css_class("project-banner-card");
 
-    let icon = gtk4::Image::from_icon_name(&doc.icon);
-    icon.set_pixel_size(32);
-    icon.set_valign(gtk4::Align::Center);
-    icon.add_css_class("accent");
-    banner.append(&icon);
+    let icon_widget = build_project_icon_widget(&doc.icon, 44, true);
+    let icon_btn = gtk4::Button::builder()
+        .child(&icon_widget)
+        .valign(gtk4::Align::Center)
+        .build();
+    icon_btn.add_css_class("flat");
+    icon_btn.set_tooltip_text(Some("Clique para alterar o nome e a imagem do projeto"));
+    {
+        let on_edit = on_edit.clone();
+        icon_btn.connect_clicked(move |_| {
+            on_edit();
+        });
+    }
+    banner.append(&icon_btn);
 
     let text_col = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     text_col.set_hexpand(true);
@@ -846,6 +1253,22 @@ fn build_project_banner(doc: &ProjectDocument) -> gtk4::Widget {
     text_col.append(&meta_row);
 
     banner.append(&text_col);
+
+    let edit_content = adw::ButtonContent::builder()
+        .icon_name("document-edit-symbolic")
+        .label("Editar")
+        .build();
+    let edit_btn = gtk4::Button::builder()
+        .child(&edit_content)
+        .valign(gtk4::Align::Center)
+        .build();
+    edit_btn.add_css_class("flat");
+    edit_btn.set_tooltip_text(Some("Alterar nome e imagem de ícone do projeto"));
+    edit_btn.connect_clicked(move |_| {
+        on_edit();
+    });
+    banner.append(&edit_btn);
+
     banner.upcast()
 }
 

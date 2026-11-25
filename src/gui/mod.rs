@@ -2,14 +2,15 @@ pub mod charts;
 pub mod renderer;
 
 use crate::client;
-use crate::gui::renderer::{render_project_view, ProjectViewCallbacks, UiViewState};
+use crate::gui::renderer::{build_project_icon_widget, render_project_view, ProjectViewCallbacks, UiViewState};
 use crate::hardware::{detect_project_hardware, LiveHardwareStats, SystemHardwareSpecs};
 use crate::ipc::{AgentActionResult, TraycerCatalog};
 use crate::model::{HardwareConfig, PanoramaAgentConfig, ProjectDocument};
 use crate::store::{
-    compute_dir_fingerprint, delete_project, ensure_projects_dir, init_project, load_all_projects,
-    load_state, move_project_in_order, resolve_projects_dir, save_state, set_project_archived,
-    update_project_hardware, InitOptions,
+    compute_dir_fingerprint, copy_project_icon_image, delete_project, ensure_projects_dir,
+    init_project, load_all_projects, load_state, move_project_in_order, resolve_projects_dir,
+    save_state, set_project_archived, update_project_hardware, update_project_identity,
+    InitOptions,
 };
 use gtk4::gdk;
 use gtk4::gio;
@@ -199,6 +200,35 @@ const CUSTOM_CSS: &str = r#"
 .expander-icon.icon-ok { color: #2ec27e; }
 .expander-icon.icon-warn { color: #e5a50a; }
 .expander-icon.icon-err { color: #e01b24; }
+
+.project-icon-frame {
+    border-radius: 8px;
+    background-color: alpha(currentColor, 0.06);
+}
+
+.cpu-core-card {
+    padding: 5px;
+    border-radius: 8px;
+    background-color: alpha(currentColor, 0.04);
+    border: 1px solid alpha(currentColor, 0.10);
+}
+
+.cpu-core-btn {
+    padding: 4px 6px;
+    min-height: 28px;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.cpu-core-btn.cpu-core-partial {
+    border: 1px solid #3584e4;
+}
+
+.cpu-thread-btn {
+    padding: 2px 4px;
+    min-height: 22px;
+    font-size: 0.76em;
+}
 "#;
 
 enum GuiEvent {
@@ -878,8 +908,7 @@ fn build_sidebar_row(
     outer.set_hexpand(true);
 
     let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    let icon = gtk4::Image::from_icon_name(&proj.icon);
-    icon.set_pixel_size(18);
+    let icon = build_project_icon_widget(&proj.icon, 22, false);
     icon.set_valign(gtk4::Align::Center);
     top.append(&icon);
 
@@ -1078,6 +1107,13 @@ fn render_selected_content(ctrl: &Rc<AppController>, preserve_scroll: bool) {
                 let path = doc.path.clone();
                 Rc::new(move |hw_cfg| {
                     apply_and_save_hardware_limits(&ctrl, &slug, &path, hw_cfg);
+                })
+            },
+            on_edit_project: {
+                let ctrl = ctrl.clone();
+                let doc_clone = doc.clone();
+                Rc::new(move || {
+                    open_edit_project_dialog(&ctrl, &doc_clone);
                 })
             },
         };
@@ -1365,6 +1401,7 @@ fn apply_and_save_hardware_limits(
     let tx = ctrl.tx.clone();
     std::thread::spawn(move || {
         let res = if hw_cfg.cpu_cores.is_some()
+            || hw_cfg.cpu_threads.as_ref().is_some_and(|v| !v.is_empty())
             || hw_cfg.ssd_percent.is_some()
             || hw_cfg.max_ram_gb.is_some()
         {
@@ -1372,6 +1409,7 @@ fn apply_and_save_hardware_limits(
                 &slug_owned,
                 &path_owned,
                 hw_cfg.cpu_cores,
+                hw_cfg.cpu_threads.clone(),
                 hw_cfg.ssd_percent,
                 hw_cfg.max_ram_gb,
             )
@@ -1382,6 +1420,228 @@ fn apply_and_save_hardware_limits(
             let _ = tx.send(GuiEvent::HardwareLimitError { message: e });
         }
     });
+}
+
+fn build_image_file_dialog(title: &str) -> gtk4::FileDialog {
+    let filter = gtk4::FileFilter::new();
+    filter.set_name(Some("Imagens (PNG, JPG, WebP, SVG, ICO)"));
+    filter.add_mime_type("image/png");
+    filter.add_mime_type("image/jpeg");
+    filter.add_mime_type("image/webp");
+    filter.add_mime_type("image/svg+xml");
+    filter.add_mime_type("image/x-icon");
+    filter.add_pattern("*.png");
+    filter.add_pattern("*.jpg");
+    filter.add_pattern("*.jpeg");
+    filter.add_pattern("*.webp");
+    filter.add_pattern("*.svg");
+    filter.add_pattern("*.ico");
+
+    let filters = gio::ListStore::new::<gtk4::FileFilter>();
+    filters.append(&filter);
+
+    gtk4::FileDialog::builder()
+        .title(title)
+        .modal(true)
+        .filters(&filters)
+        .default_filter(&filter)
+        .build()
+}
+
+fn open_edit_project_dialog(ctrl: &Rc<AppController>, doc: &ProjectDocument) {
+    let dialog = adw::Dialog::builder()
+        .title("Editar Projeto")
+        .content_width(480)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    let cancel_btn = gtk4::Button::with_label("Cancelar");
+    let save_btn = gtk4::Button::with_label("Salvar");
+    save_btn.add_css_class("suggested-action");
+    header.pack_start(&cancel_btn);
+    header.pack_end(&save_btn);
+
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 14);
+    content.set_margin_top(16);
+    content.set_margin_bottom(20);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+
+    let name_group = adw::PreferencesGroup::builder()
+        .title("Identificação do Projeto")
+        .description("Alterar o nome ou a imagem aqui fica salvo mesmo quando o agente atualizar o panorama.")
+        .build();
+    let title_row = adw::EntryRow::builder()
+        .title("Nome do projeto")
+        .text(&doc.title)
+        .build();
+    name_group.add(&title_row);
+    content.append(&name_group);
+
+    let icon_group = adw::PreferencesGroup::builder()
+        .title("Imagem de Ícone")
+        .description("Escolha uma imagem (PNG, JPG, WebP, SVG) para representar o projeto na barra lateral e no topo.")
+        .build();
+
+    let preview_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    preview_box.set_margin_top(8);
+    preview_box.set_margin_bottom(8);
+    preview_box.set_margin_start(10);
+    preview_box.set_margin_end(10);
+
+    let preview_holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    preview_holder.set_valign(gtk4::Align::Center);
+    preview_holder.append(&build_project_icon_widget(&doc.icon, 48, true));
+    preview_box.append(&preview_holder);
+
+    let info_col = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    info_col.set_hexpand(true);
+    info_col.set_valign(gtk4::Align::Center);
+
+    let chosen_label = gtk4::Label::new(Some(&doc.icon));
+    chosen_label.add_css_class("caption");
+    chosen_label.add_css_class("dim-label");
+    chosen_label.set_xalign(0.0);
+    chosen_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    info_col.append(&chosen_label);
+
+    let btn_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let pick_img_btn = gtk4::Button::with_label("Escolher Imagem...");
+    pick_img_btn.add_css_class("pill");
+    let reset_icon_btn = gtk4::Button::with_label("Ícone Padrão");
+    reset_icon_btn.add_css_class("pill");
+    btn_row.append(&pick_img_btn);
+    btn_row.append(&reset_icon_btn);
+    info_col.append(&btn_row);
+    preview_box.append(&info_col);
+
+    let preview_card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    preview_card.add_css_class("card");
+    preview_card.append(&preview_box);
+    icon_group.add(&preview_card);
+    content.append(&icon_group);
+
+    #[derive(Clone)]
+    enum IconChoice {
+        KeepExisting,
+        PickedImage(PathBuf),
+        ResetDefault,
+    }
+
+    let choice: Rc<RefCell<IconChoice>> =
+        Rc::new(RefCell::new(IconChoice::KeepExisting));
+
+    let refresh_preview = {
+        let preview_holder = preview_holder.clone();
+        let chosen_label = chosen_label.clone();
+        move |spec: &str| {
+            while let Some(ch) = preview_holder.first_child() {
+                preview_holder.remove(&ch);
+            }
+            preview_holder.append(&build_project_icon_widget(spec, 48, true));
+            chosen_label.set_text(spec);
+        }
+    };
+
+    {
+        let window = ctrl.window.clone();
+        let choice = choice.clone();
+        let refresh_preview = refresh_preview.clone();
+        pick_img_btn.connect_clicked(move |_| {
+            let fd = build_image_file_dialog("Escolher imagem de ícone do projeto");
+            let choice = choice.clone();
+            let refresh_preview = refresh_preview.clone();
+            fd.open(Some(&window), gio::Cancellable::NONE, move |res| {
+                if let Ok(file) = res {
+                    if let Some(p) = file.path() {
+                        let p_str = p.to_string_lossy().to_string();
+                        *choice.borrow_mut() = IconChoice::PickedImage(p);
+                        refresh_preview(&p_str);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let choice = choice.clone();
+        let refresh_preview = refresh_preview.clone();
+        reset_icon_btn.connect_clicked(move |_| {
+            *choice.borrow_mut() = IconChoice::ResetDefault;
+            refresh_preview(&crate::model::default_icon());
+        });
+    }
+
+    let dlg_toolbar = adw::ToolbarView::new();
+    dlg_toolbar.add_top_bar(&header);
+    dlg_toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&dlg_toolbar));
+
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
+    }
+
+    {
+        let ctrl = ctrl.clone();
+        let dialog = dialog.clone();
+        let slug = doc.slug.clone();
+        let orig_title = doc.title.clone();
+        let choice = choice.clone();
+        save_btn.connect_clicked(move |_| {
+            let new_title = title_row.text().trim().to_string();
+            if new_title.is_empty() {
+                show_toast(&ctrl, "Informe um nome válido para o projeto.");
+                return;
+            }
+
+            let mut new_icon: Option<String> = None;
+            let mut custom_icon: Option<bool> = None;
+            match choice.borrow().clone() {
+                IconChoice::KeepExisting => {}
+                IconChoice::ResetDefault => {
+                    new_icon = Some(crate::model::default_icon());
+                    custom_icon = Some(false);
+                }
+                IconChoice::PickedImage(src) => {
+                    match copy_project_icon_image(&ctrl.projects_dir, &slug, &src) {
+                        Ok(dest) => {
+                            new_icon = Some(dest);
+                            custom_icon = Some(true);
+                        }
+                        Err(e) => {
+                            show_toast(&ctrl, &e);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let title_changed = new_title != orig_title;
+            let custom_title = if title_changed { Some(true) } else { None };
+            match update_project_identity(
+                &ctrl.projects_dir,
+                &slug,
+                Some(new_title),
+                new_icon,
+                custom_title,
+                custom_icon,
+            ) {
+                Ok(_) => {
+                    dialog.close();
+                    reload_from_disk(&ctrl, true);
+                    show_toast(&ctrl, "Projeto atualizado.");
+                }
+                Err(e) => {
+                    show_toast(&ctrl, &format!("Erro ao salvar: {e}"));
+                }
+            }
+        });
+    }
+
+    dialog.present(Some(&ctrl.window));
 }
 
 fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
@@ -1422,10 +1682,38 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
     browse_btn.set_tooltip_text(Some("Escolher pasta do projeto"));
     path_row.add_suffix(&browse_btn);
 
+    let new_icon_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    let icon_row = adw::ActionRow::builder()
+        .title("Imagem de ícone (opcional)")
+        .subtitle("Padrão do sistema")
+        .build();
+    let new_pick_icon_btn = gtk4::Button::with_label("Escolher Imagem...");
+    new_pick_icon_btn.set_valign(gtk4::Align::Center);
+    icon_row.add_suffix(&new_pick_icon_btn);
+    {
+        let window = ctrl.window.clone();
+        let new_icon_path = new_icon_path.clone();
+        let icon_row = icon_row.clone();
+        new_pick_icon_btn.connect_clicked(move |_| {
+            let fd = build_image_file_dialog("Escolher imagem de ícone");
+            let new_icon_path = new_icon_path.clone();
+            let icon_row = icon_row.clone();
+            fd.open(Some(&window), gio::Cancellable::NONE, move |res| {
+                if let Ok(file) = res {
+                    if let Some(p) = file.path() {
+                        icon_row.set_subtitle(&p.file_name().and_then(|s| s.to_str()).unwrap_or("imagem selecionada"));
+                        *new_icon_path.borrow_mut() = Some(p);
+                    }
+                }
+            });
+        });
+    }
+
     basic_group.add(&title_row);
     basic_group.add(&slug_row);
     basic_group.add(&path_row);
     basic_group.add(&phase_row);
+    basic_group.add(&icon_row);
     content.append(&basic_group);
 
     let slug_edited_manually = Rc::new(Cell::new(false));
@@ -1498,12 +1786,26 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
                 return;
             }
 
+            let (icon_opt, is_custom_icon) = if let Some(src) = new_icon_path.borrow().as_ref() {
+                match copy_project_icon_image(&ctrl.projects_dir, &slug, src) {
+                    Ok(dest) => (Some(dest), true),
+                    Err(e) => {
+                        show_toast(&ctrl, &e);
+                        return;
+                    }
+                }
+            } else {
+                (None, false)
+            };
+
             match init_project(
                 &ctrl.projects_dir,
                 InitOptions {
                     slug: slug.clone(),
                     title: title.clone(),
                     path,
+                    icon: icon_opt,
+                    custom_icon: is_custom_icon,
                     progresso: 0.0,
                     confianca: 50.0,
                     phase,

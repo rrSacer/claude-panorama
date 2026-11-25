@@ -1,10 +1,12 @@
 use crate::client;
+use crate::hardware::{parse_cpu_list_spec, SystemHardwareSpecs};
 use crate::model::{parse_and_validate_json, PanoramaAgentConfig};
 use crate::schema::SCHEMA_SPEC;
 use crate::store::{
-    apply_project_json, delete_project, init_project, load_all_projects, move_project_in_order,
-    project_file_path, read_project_file, resolve_projects_dir, set_project_archived,
-    update_project_agent, update_project_hardware, InitOptions,
+    apply_project_json, copy_project_icon_image, delete_project, init_project, load_all_projects,
+    move_project_in_order, project_file_path, read_project_file, resolve_projects_dir,
+    set_project_archived, update_project_agent, update_project_hardware, update_project_identity,
+    InitOptions,
 };
 use crate::traycer_bridge::pick_default_model;
 use std::fs;
@@ -66,9 +68,16 @@ pub enum Command {
         model: Option<String>,
         reasoning_effort: Option<String>,
     },
+    Edit {
+        slug: String,
+        title: Option<String>,
+        icon: Option<String>,
+        reset_icon: bool,
+    },
     Limits {
         slug: String,
         cpu_cores: Option<u32>,
+        cpu_threads: Option<Vec<u32>>,
         ssd_percent: Option<u32>,
         max_ram_gb: Option<f64>,
         clear: bool,
@@ -94,7 +103,9 @@ pub fn usage_text() -> &'static str {
         "  panorama unarchive <slug>                  Restaura um projeto arquivado\n",
         "  panorama delete <slug> --yes               Deleta permanentemente o projeto\n",
         "  panorama move <slug> --up | --down         Altera a ordem do projeto na lista\n",
-        "  panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]\n",
+        "  panorama edit <slug> [--title \"...\"] [--icon <imagem|nome>] [--reset-icon]\n",
+        "                                             Altera nome ou ícone/imagem do projeto\n",
+        "  panorama limits <slug> [--cpus 0,1,6,7] [--cpu N] [--ssd %] [--ram GB] [--clear]\n",
         "                                             Configura limites reais de hardware\n",
         "  panorama --help | --version\n\n",
         "OPÇÕES DE `init`:\n",
@@ -177,6 +188,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, String> {
             })
         }
         "set-agent" => parse_set_agent_args(&args[1..]),
+        "edit" | "rename" => parse_edit_args(&args[1..]),
         "limits" => parse_limits_args(&args[1..]),
         other => Err(format!(
             "Subcomando desconhecido `{other}`. Execute `panorama --help`."
@@ -359,12 +371,60 @@ fn parse_apply_args(rest: &[String]) -> Result<Command, String> {
     Ok(Command::Apply { slug, source })
 }
 
+fn parse_edit_args(rest: &[String]) -> Result<Command, String> {
+    if rest.is_empty() {
+        return Err(r#"Uso: `panorama edit <slug> [--title "..."] [--icon <imagem|nome>] [--reset-icon]`"#.to_string());
+    }
+    let slug = rest[0].clone();
+    let mut title = None;
+    let mut icon = None;
+    let mut reset_icon = false;
+
+    let next_val = |idx: usize, flag: &str| -> Result<String, String> {
+        rest.get(idx + 1)
+            .cloned()
+            .ok_or_else(|| format!("Falta valor após `{flag}`"))
+    };
+
+    let mut i = 1;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        match flag {
+            "--title" | "--name" => {
+                title = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--icon" | "--image" => {
+                icon = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--reset-icon" => {
+                reset_icon = true;
+                i += 1;
+            }
+            unknown => return Err(format!("Opção desconhecida em `edit`: `{unknown}`")),
+        }
+    }
+
+    if title.is_none() && icon.is_none() && !reset_icon {
+        return Err("Informe `--title`, `--icon` ou `--reset-icon` em `panorama edit`.".to_string());
+    }
+
+    Ok(Command::Edit {
+        slug,
+        title,
+        icon,
+        reset_icon,
+    })
+}
+
 fn parse_limits_args(rest: &[String]) -> Result<Command, String> {
     if rest.is_empty() {
-        return Err("Uso: `panorama limits <slug> [--cpu N] [--ssd %] [--ram GB] [--clear]`".to_string());
+        return Err("Uso: `panorama limits <slug> [--cpus 0,1,6,7] [--cpu N] [--ssd %] [--ram GB] [--clear]`".to_string());
     }
     let slug = rest[0].clone();
     let mut cpu_cores = None;
+    let mut cpu_threads = None;
     let mut ssd_percent = None;
     let mut max_ram_gb = None;
     let mut clear = false;
@@ -379,6 +439,12 @@ fn parse_limits_args(rest: &[String]) -> Result<Command, String> {
     while i < rest.len() {
         let flag = rest[i].as_str();
         match flag {
+            "--cpus" | "--threads" | "--cores" => {
+                let raw = next_val(i, flag)?;
+                let specs = SystemHardwareSpecs::detect();
+                cpu_threads = Some(parse_cpu_list_spec(&raw, specs.total_cpus)?);
+                i += 2;
+            }
             "--cpu" => {
                 let raw = next_val(i, flag)?;
                 cpu_cores = Some(
@@ -414,6 +480,7 @@ fn parse_limits_args(rest: &[String]) -> Result<Command, String> {
     Ok(Command::Limits {
         slug,
         cpu_cores,
+        cpu_threads,
         ssd_percent,
         max_ram_gb,
         clear,
@@ -531,6 +598,8 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
                     slug: slug.clone(),
                     title: title.clone(),
                     path,
+                    icon: None,
+                    custom_icon: false,
                     progresso,
                     confianca,
                     phase,
@@ -674,9 +743,45 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             )?;
             Ok(res.message)
         }
+        Command::Edit {
+            slug,
+            title,
+            icon,
+            reset_icon,
+        } => {
+            let mut final_icon = None;
+            let mut set_custom_icon = None;
+            if reset_icon {
+                final_icon = Some(crate::model::default_icon());
+                set_custom_icon = Some(false);
+            } else if let Some(ic) = icon {
+                let candidate = Path::new(ic.trim());
+                if candidate.is_file() {
+                    let copied = copy_project_icon_image(dir, &slug, candidate)?;
+                    final_icon = Some(copied);
+                } else {
+                    final_icon = Some(ic);
+                }
+                set_custom_icon = Some(true);
+            }
+            let custom_title = title.as_ref().map(|_| true);
+            let updated = update_project_identity(
+                dir,
+                &slug,
+                title,
+                final_icon,
+                custom_title,
+                set_custom_icon,
+            )?;
+            Ok(format!(
+                "Projeto `{slug}` atualizado: título `{}`, ícone `{}`.",
+                updated.title, updated.icon
+            ))
+        }
         Command::Limits {
             slug,
             cpu_cores,
+            cpu_threads,
             ssd_percent,
             max_ram_gb,
             clear,
@@ -686,11 +791,16 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             let mut hw = doc.hardware.clone().unwrap_or_default();
             if clear {
                 hw.cpu_cores = None;
+                hw.cpu_threads = None;
                 hw.ssd_percent = None;
                 hw.max_ram_gb = None;
             } else {
-                if let Some(c) = cpu_cores {
+                if let Some(threads) = cpu_threads {
+                    hw.cpu_threads = Some(threads);
+                    hw.cpu_cores = None;
+                } else if let Some(c) = cpu_cores {
                     hw.cpu_cores = Some(c);
+                    hw.cpu_threads = None;
                 }
                 if let Some(s) = ssd_percent {
                     hw.ssd_percent = Some(s);
@@ -701,11 +811,16 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             }
             let updated = update_project_hardware(dir, &slug, hw.clone())?;
             let h = updated.hardware.unwrap_or_default();
-            if h.cpu_cores.is_some() || h.ssd_percent.is_some() || h.max_ram_gb.is_some() {
+            if h.cpu_cores.is_some()
+                || h.cpu_threads.as_ref().is_some_and(|v| !v.is_empty())
+                || h.ssd_percent.is_some()
+                || h.max_ram_gb.is_some()
+            {
                 let _ = client::apply_hardware_limits(
                     &slug,
                     &doc.path,
                     h.cpu_cores,
+                    h.cpu_threads.clone(),
                     h.ssd_percent,
                     h.max_ram_gb,
                 );
@@ -797,6 +912,41 @@ mod tests {
             Command::Delete {
                 slug: "foo".into(),
                 yes: true
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&[
+                "edit".into(),
+                "foo".into(),
+                "--title".into(),
+                "Novo Nome".into(),
+                "--icon".into(),
+                "/tmp/a.png".into(),
+            ])
+            .unwrap(),
+            Command::Edit {
+                slug: "foo".into(),
+                title: Some("Novo Nome".into()),
+                icon: Some("/tmp/a.png".into()),
+                reset_icon: false,
+            }
+        );
+        let lim_cpus = parse_cli_args(&[
+            "limits".into(),
+            "foo".into(),
+            "--cpus".into(),
+            "0,1".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            lim_cpus,
+            Command::Limits {
+                slug: "foo".into(),
+                cpu_cores: None,
+                cpu_threads: Some(vec![0, 1]),
+                ssd_percent: None,
+                max_ram_gb: None,
+                clear: false,
             }
         );
     }

@@ -205,6 +205,8 @@ pub struct InitOptions {
     pub slug: String,
     pub title: String,
     pub path: String,
+    pub icon: Option<String>,
+    pub custom_icon: bool,
     pub progresso: f64,
     pub confianca: f64,
     pub phase: String,
@@ -220,12 +222,16 @@ pub fn init_project(dir: &Path, opts: InitOptions) -> Result<PathBuf, String> {
     } else {
         opts.phase
     };
+    let icon_val = opts
+        .icon
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(crate::model::default_icon);
     let doc = ProjectDocument {
         slug: opts.slug.clone(),
         title: opts.title,
         subtitle: String::new(),
         path: opts.path,
-        icon: crate::model::default_icon(),
+        icon: icon_val,
         status: ProjectStatus::Ativo,
         phase: phase.clone(),
         updated_at: ts.clone(),
@@ -247,6 +253,8 @@ pub fn init_project(dir: &Path, opts: InitOptions) -> Result<PathBuf, String> {
             note: phase,
         }],
         archived: false,
+        custom_title: false,
+        custom_icon: opts.custom_icon,
         agent: opts.agent,
         hardware: opts.hardware,
         ui: Vec::new(),
@@ -280,6 +288,14 @@ pub fn apply_project_json(
         if raw_val.get("archived").is_none() {
             doc.archived = prev.archived;
         }
+        doc.custom_title = prev.custom_title;
+        doc.custom_icon = prev.custom_icon;
+        if prev.custom_title {
+            doc.title = prev.title.clone();
+        }
+        if prev.custom_icon || raw_val.get("icon").is_none() {
+            doc.icon = prev.icon.clone();
+        }
         if raw_val.get("agent").is_none() {
             doc.agent = prev.agent.clone();
         } else if let (Some(new_ag), Some(prev_ag)) = (doc.agent.as_mut(), prev.agent.as_ref()) {
@@ -307,6 +323,9 @@ pub fn apply_project_json(
             (Some(new_hw), Some(prev_hw)) => {
                 if new_hw.cpu_cores.is_none() {
                     new_hw.cpu_cores = prev_hw.cpu_cores;
+                }
+                if new_hw.cpu_threads.is_none() {
+                    new_hw.cpu_threads = prev_hw.cpu_threads.clone();
                 }
                 if new_hw.ssd_percent.is_none() {
                     new_hw.ssd_percent = prev_hw.ssd_percent;
@@ -515,6 +534,7 @@ pub fn delete_project(dir: &Path, slug: &str) -> Result<(), String> {
     }
     fs::remove_file(&path)
         .map_err(|e| format!("Falha ao deletar `{}`: {e}", path.display()))?;
+    cleanup_project_icons(dir, slug);
     let mut state = load_state(dir);
     state.order.retain(|s| s != slug);
     let _ = save_state(dir, &state);
@@ -531,6 +551,104 @@ pub fn update_project_agent(
     let mut doc = read_project_file(&path).map_err(|e| e.to_string())?;
     doc.slug = slug.to_string();
     doc.agent = Some(agent);
+    atomic_write_project(dir, slug, &doc)?;
+    Ok(doc)
+}
+
+pub fn resolve_icons_dir(projects_dir: &Path) -> PathBuf {
+    projects_dir
+        .parent()
+        .unwrap_or(projects_dir)
+        .join("icons")
+}
+
+fn cleanup_project_icons(projects_dir: &Path, slug: &str) {
+    let icons_dir = resolve_icons_dir(projects_dir);
+    let Ok(entries) = fs::read_dir(&icons_dir) else {
+        return;
+    };
+    let prefix_dash = format!("{slug}-");
+    let prefix_dot = format!("{slug}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix_dash) || name.starts_with(&prefix_dot) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+pub fn copy_project_icon_image(
+    projects_dir: &Path,
+    slug: &str,
+    src_path: &Path,
+) -> Result<String, String> {
+    validate_slug(slug)?;
+    if !src_path.is_file() {
+        return Err(format!("Arquivo de imagem não encontrado: `{}`", src_path.display()));
+    }
+    let ext = src_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "svg" | "ico") {
+        return Err(format!(
+            "Formato de imagem não suportado (`.{ext}`). Use PNG, JPG, WebP, SVG ou ICO."
+        ));
+    }
+
+    let icons_dir = resolve_icons_dir(projects_dir);
+    fs::create_dir_all(&icons_dir)
+        .map_err(|e| format!("Falha ao criar pasta de ícones `{}`: {e}", icons_dir.display()))?;
+    let _ = fs::set_permissions(&icons_dir, fs::Permissions::from_mode(0o777));
+
+    cleanup_project_icons(projects_dir, slug);
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = icons_dir.join(format!("{slug}-{stamp}.{ext}"));
+    fs::copy(src_path, &dest)
+        .map_err(|e| format!("Falha ao copiar imagem para `{}`: {e}", dest.display()))?;
+    let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o666));
+    Ok(dest.to_string_lossy().to_string())
+}
+
+pub fn update_project_identity(
+    dir: &Path,
+    slug: &str,
+    new_title: Option<String>,
+    new_icon: Option<String>,
+    custom_title: Option<bool>,
+    custom_icon: Option<bool>,
+) -> Result<ProjectDocument, String> {
+    validate_slug(slug)?;
+    let path = project_file_path(dir, slug);
+    let mut doc = read_project_file(&path).map_err(|e| e.to_string())?;
+    doc.slug = slug.to_string();
+    if let Some(t) = new_title {
+        let trimmed = t.trim().to_string();
+        if trimmed.is_empty() {
+            return Err("O nome do projeto não pode ficar vazio.".to_string());
+        }
+        doc.title = trimmed;
+    }
+    if let Some(ic) = new_icon {
+        let trimmed = ic.trim().to_string();
+        doc.icon = if trimmed.is_empty() {
+            crate::model::default_icon()
+        } else {
+            trimmed
+        };
+    }
+    if let Some(ct) = custom_title {
+        doc.custom_title = ct;
+    }
+    if let Some(ci) = custom_icon {
+        doc.custom_icon = ci;
+    }
+    doc.validate().map_err(|e| e.to_string())?;
     atomic_write_project(dir, slug, &doc)?;
     Ok(doc)
 }
@@ -602,6 +720,8 @@ mod tests {
                 slug: "meu-proj".to_string(),
                 title: "Meu Projeto".to_string(),
                 path: "/home/sacer/Projects/meu-proj".to_string(),
+                icon: None,
+                custom_icon: false,
                 progresso: 10.0,
                 confianca: 60.0,
                 phase: "Onda 0".to_string(),
@@ -657,6 +777,8 @@ mod tests {
                     slug: slug.into(),
                     title: title.into(),
                     path: String::new(),
+                    icon: None,
+                    custom_icon: false,
                     progresso: 10.0,
                     confianca: 50.0,
                     phase: "Init".into(),
@@ -685,7 +807,8 @@ mod tests {
             "alpha",
             HardwareConfig {
                 heavy_cpu: Some(true),
-                cpu_cores: Some(4),
+                cpu_cores: None,
+                cpu_threads: Some(vec![0, 6]),
                 ssd_percent: Some(60),
                 max_ram_gb: Some(10.0),
                 ..Default::default()
@@ -700,7 +823,7 @@ mod tests {
                 .unwrap();
         assert!(applied.archived);
         assert_eq!(applied.agent.as_ref().unwrap().agent_id.as_deref(), Some("ag-123"));
-        assert_eq!(applied.hardware.as_ref().unwrap().cpu_cores, Some(4));
+        assert_eq!(applied.hardware.as_ref().unwrap().cpu_threads, Some(vec![0, 6]));
 
         // Reordenação com setas
         move_project_in_order(&dir, "gamma", true, None).unwrap();
@@ -711,6 +834,53 @@ mod tests {
         delete_project(&dir, "beta").unwrap();
         let loaded2 = load_all_projects(&dir);
         assert_eq!(loaded2.projects.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_title_and_icon_survive_agent_apply() {
+        let dir = temp_test_dir("identity-keep");
+        init_project(
+            &dir,
+            InitOptions {
+                slug: "demo".into(),
+                title: "Nome Inicial".into(),
+                path: "/tmp/demo".into(),
+                icon: None,
+                custom_icon: false,
+                progresso: 0.0,
+                confianca: 50.0,
+                phase: "Init".into(),
+                agent: None,
+                hardware: None,
+            },
+        )
+        .unwrap();
+
+        update_project_identity(
+            &dir,
+            "demo",
+            Some("Meu Nome Personalizado".into()),
+            Some("/tmp/custom.png".into()),
+            Some(true),
+            Some(true),
+        )
+        .unwrap();
+
+        let agent_json = r#"{
+            "title": "Nome Do Agente",
+            "icon": "utilities-terminal-symbolic",
+            "progresso": 42.0,
+            "confianca": 80.0,
+            "phase": "Fase 2"
+        }"#;
+        let (_, applied) = apply_project_json(&dir, "demo", agent_json).unwrap();
+        assert_eq!(applied.title, "Meu Nome Personalizado");
+        assert_eq!(applied.icon, "/tmp/custom.png");
+        assert!(applied.custom_title);
+        assert!(applied.custom_icon);
+        assert_eq!(applied.progresso, 42.0);
 
         let _ = fs::remove_dir_all(&dir);
     }

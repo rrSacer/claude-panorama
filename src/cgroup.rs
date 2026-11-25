@@ -1,4 +1,4 @@
-use crate::hardware::{LiveHardwareStats, SystemHardwareSpecs};
+use crate::hardware::{format_cpu_ranges, LiveHardwareStats, SystemHardwareSpecs};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,13 +90,17 @@ const WORKER_PROCS: &[&str] = &[
 pub struct TrackedLimits {
     pub path: String,
     pub cpu_cores: Option<u32>,
+    pub cpu_threads: Option<Vec<u32>>,
     pub ssd_percent: Option<u32>,
     pub max_ram_gb: Option<f64>,
 }
 
 impl TrackedLimits {
     pub fn has_any_limit(&self) -> bool {
-        self.cpu_cores.is_some() || self.ssd_percent.is_some() || self.max_ram_gb.is_some()
+        self.cpu_cores.is_some()
+            || self.cpu_threads.as_ref().is_some_and(|v| !v.is_empty())
+            || self.ssd_percent.is_some()
+            || self.max_ram_gb.is_some()
     }
 }
 
@@ -138,12 +142,20 @@ impl HardwareMonitor {
         slug: &str,
         path: &str,
         cpu_cores: Option<u32>,
+        cpu_threads: Option<Vec<u32>>,
         ssd_percent: Option<u32>,
         max_ram_gb: Option<f64>,
     ) -> Result<(), String> {
+        let normalized_threads = cpu_threads.map(|mut list| {
+            list.retain(|&c| c < self.specs.total_cpus);
+            list.sort_unstable();
+            list.dedup();
+            list
+        }).filter(|v| !v.is_empty());
         let limits = TrackedLimits {
             path: path.to_string(),
             cpu_cores,
+            cpu_threads: normalized_threads,
             ssd_percent,
             max_ram_gb,
         };
@@ -309,13 +321,22 @@ pub fn apply_cgroup_limits(
             .map_err(|e| format!("Falha ao criar cgroup `{}`: {e}", dir.display()))?;
     }
 
-    // 1. CPU cores via cpuset.cpus
+    // 1. CPU cores/threads específicos via cpuset.cpus
     let total = specs.total_cpus.max(1);
-    let cores = limits.cpu_cores.unwrap_or(total).clamp(1, total);
-    let cpuset_val = if cores <= 1 {
-        "0".to_string()
+    let cpuset_val = if let Some(threads) = limits.cpu_threads.as_ref().filter(|v| !v.is_empty()) {
+        let filtered: Vec<u32> = threads.iter().copied().filter(|&c| c < total).collect();
+        if filtered.is_empty() {
+            "0".to_string()
+        } else {
+            format_cpu_ranges(&filtered)
+        }
     } else {
-        format!("0-{}", cores - 1)
+        let cores = limits.cpu_cores.unwrap_or(total).clamp(1, total);
+        if cores <= 1 {
+            "0".to_string()
+        } else {
+            format!("0-{}", cores - 1)
+        }
     };
     if let Err(e) = fs::write(dir.join("cpuset.cpus"), &cpuset_val) {
         return Err(format!("Falha ao gravar cpuset.cpus ({cpuset_val}): {e}"));

@@ -239,6 +239,8 @@ pub struct HardwareConfig {
     pub reason: String,
     #[serde(default)]
     pub cpu_cores: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_threads: Option<Vec<u32>>,
     #[serde(default)]
     pub ssd_percent: Option<u32>,
     #[serde(default)]
@@ -293,6 +295,14 @@ pub struct ProjectDocument {
     /// Se true, projeto está arquivado (oculto da lista principal até abrir Arquivados)
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
+
+    /// Se true, o usuário renomeou manualmente o projeto na interface (preservado no `apply`)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub custom_title: bool,
+
+    /// Se true, o usuário escolheu manualmente o ícone/imagem do projeto (preservado no `apply`)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub custom_icon: bool,
 
     /// Agente dedicado no Traycer para montar, monitorar e atualizar este panorama
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -740,6 +750,15 @@ impl ProjectDocument {
                 if cores == 0 {
                     return Err(ValidationError {
                         message: "`hardware.cpu_cores` deve ser >= 1".to_string(),
+                        line: None,
+                        column: None,
+                    });
+                }
+            }
+            if let Some(threads) = &hw.cpu_threads {
+                if threads.is_empty() {
+                    return Err(ValidationError {
+                        message: "`hardware.cpu_threads` deve conter ao menos 1 thread".to_string(),
                         line: None,
                         column: None,
                     });

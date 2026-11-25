@@ -86,6 +86,8 @@ pub enum DaemonRequest {
         slug: String,
         path: String,
         cpu_cores: Option<u32>,
+        #[serde(default)]
+        cpu_threads: Option<Vec<u32>>,
         ssd_percent: Option<u32>,
         max_ram_gb: Option<f64>,
     },

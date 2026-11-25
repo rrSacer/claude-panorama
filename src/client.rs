@@ -204,6 +204,7 @@ pub fn apply_hardware_limits(
     slug: &str,
     path: &str,
     cpu_cores: Option<u32>,
+    cpu_threads: Option<Vec<u32>>,
     ssd_percent: Option<u32>,
     max_ram_gb: Option<f64>,
 ) -> Result<(), String> {
@@ -212,6 +213,7 @@ pub fn apply_hardware_limits(
             slug: slug.to_string(),
             path: path.to_string(),
             cpu_cores,
+            cpu_threads: cpu_threads.clone(),
             ssd_percent,
             max_ram_gb,
         },
@@ -222,7 +224,7 @@ pub fn apply_hardware_limits(
         Ok(_) => Err("Resposta inesperada ao aplicar limites de hardware.".to_string()),
         Err(_err) if is_root() => {
             let mut mon = HardwareMonitor::new();
-            mon.set_limits(slug, path, cpu_cores, ssd_percent, max_ram_gb)
+            mon.set_limits(slug, path, cpu_cores, cpu_threads, ssd_percent, max_ram_gb)
         }
         Err(err) => Err(err),
     }

@@ -3,9 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CpuCoreInfo {
+    pub core_id: u32,
+    pub threads: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SystemHardwareSpecs {
     pub total_cpus: u32,
+    #[serde(default)]
+    pub physical_cores: Vec<CpuCoreInfo>,
     pub total_ram_gb: f64,
     pub ssd_max_mb_s: f64,
 }
@@ -22,10 +30,12 @@ impl SystemHardwareSpecs {
             .map(|n| n.get() as u32)
             .unwrap_or(4)
             .max(1);
+        let physical_cores = detect_cpu_topology(total_cpus);
         let total_ram_gb = read_total_ram_gb().unwrap_or(16.0);
         let ssd_max_mb_s = detect_default_ssd_mb_s();
         Self {
             total_cpus,
+            physical_cores,
             total_ram_gb,
             ssd_max_mb_s,
         }
@@ -69,7 +79,11 @@ pub fn detect_project_hardware(
     let mut show_ssd = explicit.and_then(|h| h.heavy_ssd).unwrap_or(auto_ssd);
 
     // Se o usuário já configurou um limite explícito, mantenha aquele controle visível
-    if explicit.and_then(|h| h.cpu_cores).is_some() {
+    if explicit.and_then(|h| h.cpu_cores).is_some()
+        || explicit
+            .and_then(|h| h.cpu_threads.as_ref())
+            .is_some_and(|v| !v.is_empty())
+    {
         show_cpu = true;
     }
     if explicit.and_then(|h| h.max_ram_gb).is_some() {
@@ -239,6 +253,130 @@ fn detect_static_profile(doc: &ProjectDocument) -> (bool, bool, bool, String) {
     (false, false, false, String::new())
 }
 
+pub fn format_cpu_ranges(cpus: &[u32]) -> String {
+    if cpus.is_empty() {
+        return String::new();
+    }
+    let mut sorted = cpus.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut start = sorted[0];
+    let mut end = sorted[0];
+    for &c in &sorted[1..] {
+        if c == end + 1 {
+            end = c;
+        } else {
+            if start == end {
+                parts.push(start.to_string());
+            } else {
+                parts.push(format!("{start}-{end}"));
+            }
+            start = c;
+            end = c;
+        }
+    }
+    if start == end {
+        parts.push(start.to_string());
+    } else {
+        parts.push(format!("{start}-{end}"));
+    }
+    parts.join(",")
+}
+
+pub fn parse_cpu_list_spec(spec: &str, max_cpus: u32) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if let Some((a_str, b_str)) = p.split_once('-') {
+            let a: u32 = a_str
+                .trim()
+                .parse()
+                .map_err(|_| format!("CPU inválida em intervalo: `{p}`"))?;
+            let b: u32 = b_str
+                .trim()
+                .parse()
+                .map_err(|_| format!("CPU inválida em intervalo: `{p}`"))?;
+            if a > b {
+                return Err(format!("Intervalo de CPUs invertido: `{p}`"));
+            }
+            for id in a..=b {
+                if id >= max_cpus {
+                    return Err(format!("Thread/CPU {id} excede total disponível ({max_cpus})"));
+                }
+                out.push(id);
+            }
+        } else {
+            let id: u32 = p
+                .parse()
+                .map_err(|_| format!("CPU inválida: `{p}`"))?;
+            if id >= max_cpus {
+                return Err(format!("Thread/CPU {id} excede total disponível ({max_cpus})"));
+            }
+            out.push(id);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    if out.is_empty() {
+        return Err("Nenhuma thread/CPU informada.".to_string());
+    }
+    Ok(out)
+}
+
+fn detect_cpu_topology(total_cpus: u32) -> Vec<CpuCoreInfo> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
+    let cpu_root = Path::new("/sys/devices/system/cpu");
+
+    if let Ok(entries) = fs::read_dir(cpu_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(id_str) = name.strip_prefix("cpu") else {
+                continue;
+            };
+            let Ok(cpu_id) = id_str.parse::<u32>() else {
+                continue;
+            };
+            let topo = entry.path().join("topology");
+            let Ok(core_raw) = fs::read_to_string(topo.join("core_id")) else {
+                continue;
+            };
+            let Ok(core_id) = core_raw.trim().parse::<u32>() else {
+                continue;
+            };
+            let pkg_id = fs::read_to_string(topo.join("physical_package_id"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            groups.entry((pkg_id, core_id)).or_default().push(cpu_id);
+        }
+    }
+
+    if !groups.is_empty() {
+        let mut cores = Vec::with_capacity(groups.len());
+        for (idx, ((_, _), mut threads)) in groups.into_iter().enumerate() {
+            threads.sort_unstable();
+            threads.dedup();
+            cores.push(CpuCoreInfo {
+                core_id: idx as u32,
+                threads,
+            });
+        }
+        return cores;
+    }
+
+    (0..total_cpus)
+        .map(|i| CpuCoreInfo {
+            core_id: i,
+            threads: vec![i],
+        })
+        .collect()
+}
+
 fn read_total_ram_gb() -> Option<f64> {
     let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
@@ -301,6 +439,8 @@ mod tests {
             confianca_riscos: Vec::new(),
             history: Vec::new(),
             archived: false,
+            custom_title: false,
+            custom_icon: false,
             agent: None,
             hardware: None,
             ui: Vec::new(),
@@ -338,5 +478,15 @@ mod tests {
         assert!(custom_needs.show_cpu && !custom_needs.show_ram && !custom_needs.show_ssd);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn cpu_range_formatting_and_parsing_roundtrips() {
+        assert_eq!(format_cpu_ranges(&[6, 0, 7, 1, 8, 2]), "0-2,6-8");
+        assert_eq!(format_cpu_ranges(&[0, 6]), "0,6");
+        assert_eq!(parse_cpu_list_spec("0-1,6-7", 12).unwrap(), vec![0, 1, 6, 7]);
+        assert!(parse_cpu_list_spec("12", 12).is_err());
+        let specs = SystemHardwareSpecs::detect();
+        assert!(!specs.physical_cores.is_empty());
     }
 }
