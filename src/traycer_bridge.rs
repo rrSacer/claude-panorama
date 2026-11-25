@@ -686,52 +686,29 @@ pub fn request_panorama_update(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> Result<AgentActionResult, String> {
-    if let (Some(aid), Some(eid)) = (
-        agent_id.filter(|s| !s.trim().is_empty()),
-        epic_id.filter(|s| !s.trim().is_empty()),
-    ) {
-        let prompt = build_update_agent_prompt(slug, title, path);
-        match send_user_message_to_chat(eid, aid, harness_id, model, reasoning_effort, &prompt) {
-            Ok(()) => {
-                let cfg = PanoramaAgentConfig {
-                    agent_id: Some(aid.to_string()),
-                    epic_id: Some(eid.to_string()),
-                    harness_id: harness_id.unwrap_or("antigravity").to_string(),
-                    model: model.unwrap_or("gemini-4-hydrogen").to_string(),
-                    reasoning_effort: reasoning_effort.map(|s| s.to_string()),
-                    last_requested_at: Some(now_iso()),
-                    last_status: Some("Atualização solicitada ao agente".to_string()),
-                };
-                let _ = update_project_agent(projects_dir, slug, cfg.clone());
-                return Ok(AgentActionResult {
-                    agent: cfg,
-                    message: "Pedido de atualização enviado para o agente dedicado.".to_string(),
-                    created_new: false,
-                });
-            }
-            Err(err) => {
-                let lower = err.to_lowercase();
-                if !(lower.contains("not found") || lower.contains("não encontrad") || lower.contains("closed")) {
-                    return Err(err);
-                }
-            }
-        }
-    }
-
-    let (h, m, eff) = match (
-        harness_id.filter(|s| !s.trim().is_empty()),
-        model.filter(|s| !s.trim().is_empty()),
-    ) {
-        (Some(hh), Some(mm)) => (
-            hh.to_string(),
-            mm.to_string(),
-            reasoning_effort.map(|s| s.to_string()),
-        ),
-        _ => {
-            let cat = list_traycer_catalog()?;
-            pick_default_model(&cat)
-                .ok_or("Nenhum modelo disponível no Traycer para criar o agente dedicado.")?
-        }
+    let Some(aid) = agent_id.filter(|s| !s.trim().is_empty()) else {
+        return Err("Nenhum subagente vinculado a este panorama. Peça ao maestro da conversa no Traycer para criar o subagente na aba Agents e vinculá-lo com `panorama set-agent`.".to_string());
     };
-    start_panorama_agent(projects_dir, slug, title, path, &h, &m, eff.as_deref())
+    let Some(eid) = epic_id.filter(|s| !s.trim().is_empty()) else {
+        return Err("Subagente sem `epic_id` configurado. Vincule novamente pelo maestro com `panorama set-agent`.".to_string());
+    };
+
+    let prompt = build_update_agent_prompt(slug, title, path);
+    send_user_message_to_chat(eid, aid, harness_id, model, reasoning_effort, &prompt)?;
+
+    let cfg = PanoramaAgentConfig {
+        agent_id: Some(aid.to_string()),
+        epic_id: Some(eid.to_string()),
+        harness_id: harness_id.unwrap_or("antigravity").to_string(),
+        model: model.unwrap_or("gemini-4-hydrogen").to_string(),
+        reasoning_effort: reasoning_effort.map(|s| s.to_string()),
+        last_requested_at: Some(now_iso()),
+        last_status: Some("Atualização solicitada ao subagente".to_string()),
+    };
+    let _ = update_project_agent(projects_dir, slug, cfg.clone());
+    Ok(AgentActionResult {
+        agent: cfg,
+        message: "Pedido de atualização enviado para o subagente dedicado.".to_string(),
+        created_new: false,
+    })
 }

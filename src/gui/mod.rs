@@ -11,7 +11,6 @@ use crate::store::{
     load_state, move_project_in_order, resolve_projects_dir, save_state, set_project_archived,
     update_project_hardware, InitOptions,
 };
-use crate::traycer_bridge::pick_default_model;
 use gtk4::gdk;
 use gtk4::gio;
 use gtk4::glib;
@@ -288,7 +287,7 @@ fn build_main_window(app: &adw::Application) {
 
     let new_btn = gtk4::Button::from_icon_name("list-add-symbolic");
     new_btn.add_css_class("suggested-action");
-    new_btn.set_tooltip_text(Some("Novo panorama + agente dedicado"));
+    new_btn.set_tooltip_text(Some("Novo panorama"));
     sidebar_header.pack_start(&new_btn);
 
     let archived_toggle = gtk4::ToggleButton::new();
@@ -341,12 +340,15 @@ fn build_main_window(app: &adw::Application) {
     let content_title = adw::WindowTitle::new("Claude Panorama", "Monitoramento em tempo real");
     content_header.set_title_widget(Some(&content_title));
 
-    let update_btn = gtk4::Button::builder()
-        .label("Atualizar")
+    let update_btn_content = adw::ButtonContent::builder()
         .icon_name("view-refresh-symbolic")
+        .label("Atualizar")
+        .build();
+    let update_btn = gtk4::Button::builder()
+        .child(&update_btn_content)
         .build();
     update_btn.set_tooltip_text(Some(
-        "Enviar pedido ao agente dedicado para atualizar este panorama",
+        "Enviar pedido ao subagente dedicado para atualizar este panorama",
     ));
     content_header.pack_start(&update_btn);
 
@@ -1005,7 +1007,22 @@ fn render_selected_content(ctrl: &Rc<AppController>, preserve_scroll: bool) {
         ctrl.content_title.set_title(&doc.title);
         ctrl.content_title.set_subtitle(&sub);
 
-        ctrl.update_btn.set_sensitive(true);
+        let has_linked_agent = doc
+            .agent
+            .as_ref()
+            .and_then(|a| a.agent_id.as_deref())
+            .is_some_and(|aid| !aid.trim().is_empty())
+            && doc
+                .agent
+                .as_ref()
+                .and_then(|a| a.epic_id.as_deref())
+                .is_some_and(|eid| !eid.trim().is_empty());
+        ctrl.update_btn.set_sensitive(has_linked_agent);
+        ctrl.update_btn.set_tooltip_text(Some(if has_linked_agent {
+            "Enviar pedido ao subagente dedicado para atualizar este panorama"
+        } else {
+            "Aguardando o maestro da conversa no Traycer criar e vincular o subagente"
+        }));
         ctrl.archive_btn.set_sensitive(true);
         ctrl.delete_btn.set_sensitive(true);
 
@@ -1088,7 +1105,7 @@ fn render_selected_content(ctrl: &Rc<AppController>, preserve_scroll: bool) {
             .icon_name("applications-engineering-symbolic")
             .title("Nenhum projeto registrado ainda")
             .description(format!(
-                "Clique no botão + na barra lateral para criar um panorama com agente dedicado.\n\nDiretório monitorado:\n{}",
+                "Clique no botão + na barra lateral para criar um panorama.\n\nDiretório monitorado:\n{}",
                 ctrl.projects_dir.display()
             ))
             .vexpand(true)
@@ -1101,13 +1118,24 @@ fn render_selected_content(ctrl: &Rc<AppController>, preserve_scroll: bool) {
 fn start_or_configure_project_agent(
     ctrl: &Rc<AppController>,
     slug: &str,
-    title: &str,
-    path: &str,
+    _title: &str,
+    _path: &str,
     cur_agent: Option<&PanoramaAgentConfig>,
     harness_id: &str,
     model: &str,
     effort: Option<String>,
 ) {
+    let Some(ag) = cur_agent.filter(|a| {
+        a.agent_id.as_deref().is_some_and(|s| !s.trim().is_empty())
+            && a.epic_id.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }) else {
+        show_toast(
+            ctrl,
+            "Nenhum subagente vinculado. Peça ao maestro da conversa no Traycer para criar e vincular o subagente.",
+        );
+        return;
+    };
+
     let mut state = load_state(&ctrl.projects_dir);
     state.default_harness = Some(harness_id.to_string());
     state.default_model = Some(model.to_string());
@@ -1116,55 +1144,31 @@ fn start_or_configure_project_agent(
 
     let projects_dir = ctrl.projects_dir.clone();
     let slug_owned = slug.to_string();
-    let title_owned = title.to_string();
-    let path_owned = path.to_string();
     let harness_owned = harness_id.to_string();
     let model_owned = model.to_string();
     let tx = ctrl.tx.clone();
+    let aid = ag.agent_id.clone().unwrap_or_default();
+    let eid = ag.epic_id.clone();
 
-    if let Some(ag) = cur_agent.filter(|a| a.agent_id.as_deref().is_some_and(|s| !s.is_empty())) {
-        let aid = ag.agent_id.clone().unwrap_or_default();
-        let eid = ag.epic_id.clone();
-        show_toast(
-            ctrl,
-            &format!("Configurando modelo do agente ({harness_id} · {model})..."),
+    show_toast(
+        ctrl,
+        &format!("Configurando modelo do agente ({harness_id} · {model})..."),
+    );
+    std::thread::spawn(move || {
+        let res = client::configure_panorama_agent(
+            &projects_dir,
+            &slug_owned,
+            &aid,
+            eid.as_deref(),
+            &harness_owned,
+            &model_owned,
+            effort.as_deref(),
         );
-        std::thread::spawn(move || {
-            let res = client::configure_panorama_agent(
-                &projects_dir,
-                &slug_owned,
-                &aid,
-                eid.as_deref(),
-                &harness_owned,
-                &model_owned,
-                effort.as_deref(),
-            );
-            let _ = tx.send(GuiEvent::AgentFinished {
-                slug: slug_owned,
-                result: res,
-            });
+        let _ = tx.send(GuiEvent::AgentFinished {
+            slug: slug_owned,
+            result: res,
         });
-    } else {
-        show_toast(
-            ctrl,
-            &format!("Iniciando agente dedicado ({harness_id} · {model})..."),
-        );
-        std::thread::spawn(move || {
-            let res = client::start_panorama_agent(
-                &projects_dir,
-                &slug_owned,
-                &title_owned,
-                &path_owned,
-                &harness_owned,
-                &model_owned,
-                effort.as_deref(),
-            );
-            let _ = tx.send(GuiEvent::AgentFinished {
-                slug: slug_owned,
-                result: res,
-            });
-        });
-    }
+    });
 }
 
 fn trigger_agent_update(ctrl: &Rc<AppController>) {
@@ -1181,14 +1185,31 @@ fn trigger_agent_update(ctrl: &Rc<AppController>) {
         return;
     };
 
+    let ag = doc.agent.clone();
+    let agent_id = ag
+        .as_ref()
+        .and_then(|a| a.agent_id.clone())
+        .filter(|s| !s.trim().is_empty());
+    let epic_id = ag
+        .as_ref()
+        .and_then(|a| a.epic_id.clone())
+        .filter(|s| !s.trim().is_empty());
+
+    if agent_id.is_none() || epic_id.is_none() {
+        show_toast(
+            ctrl,
+            "Nenhum subagente vinculado. Peça ao maestro da conversa no Traycer para criar e vincular o subagente.",
+        );
+        return;
+    }
+
     show_toast(
         ctrl,
-        &format!("Enviando pedido de atualização para o agente de `{}`...", doc.title),
+        &format!("Enviando pedido de atualização para o subagente de `{}`...", doc.title),
     );
 
     let projects_dir = ctrl.projects_dir.clone();
     let state = load_state(&projects_dir);
-    let ag = doc.agent.clone();
     let harness = ag
         .as_ref()
         .map(|a| a.harness_id.clone())
@@ -1203,8 +1224,6 @@ fn trigger_agent_update(ctrl: &Rc<AppController>) {
         .as_ref()
         .and_then(|a| a.reasoning_effort.clone())
         .or(state.default_reasoning_effort);
-    let agent_id = ag.as_ref().and_then(|a| a.agent_id.clone());
-    let epic_id = ag.as_ref().and_then(|a| a.epic_id.clone());
 
     let tx = ctrl.tx.clone();
     std::thread::spawn(move || {
@@ -1368,12 +1387,12 @@ fn apply_and_save_hardware_limits(
 fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
     let dialog = adw::Dialog::builder()
         .title("Novo Panorama")
-        .content_width(500)
+        .content_width(480)
         .build();
 
     let header = adw::HeaderBar::new();
     let cancel_btn = gtk4::Button::with_label("Cancelar");
-    let create_btn = gtk4::Button::with_label("Iniciar Panorama + Agente");
+    let create_btn = gtk4::Button::with_label("Criar Panorama");
     create_btn.add_css_class("suggested-action");
     header.pack_start(&cancel_btn);
     header.pack_end(&create_btn);
@@ -1386,7 +1405,7 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
 
     let basic_group = adw::PreferencesGroup::builder()
         .title("Dados do Projeto")
-        .description("Ao iniciar, um agente dedicado do Traycer será criado para montar e atualizar este panorama.")
+        .description("Cria o registro do panorama. Para montar e atualizar os dados, peça ao maestro da conversa do projeto no Traycer para criar e vincular o subagente na aba Agents.")
         .build();
 
     let title_row = adw::EntryRow::builder().title("Nome do projeto").build();
@@ -1453,155 +1472,6 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
         });
     }
 
-    // Seleção de modelo do Traycer
-    let agent_group = adw::PreferencesGroup::builder()
-        .title("Agente Dedicado (Traycer)")
-        .description("Escolha qual harness e modelo esse agente usará para construir e atualizar o panorama.")
-        .build();
-
-    let mut catalog = ctrl.catalog.borrow().clone();
-    if catalog.harnesses.is_empty() {
-        if let Ok(fresh) = client::list_traycer_models(false) {
-            *ctrl.catalog.borrow_mut() = fresh.clone();
-            catalog = fresh;
-        }
-    }
-
-    let state = load_state(&ctrl.projects_dir);
-    let default_pair = pick_default_model(&catalog);
-    let pref_harness = state
-        .default_harness
-        .or_else(|| default_pair.as_ref().map(|d| d.0.clone()))
-        .unwrap_or_else(|| "antigravity".to_string());
-    let pref_model = state
-        .default_model
-        .or_else(|| default_pair.as_ref().map(|d| d.1.clone()));
-    let pref_effort = state
-        .default_reasoning_effort
-        .or_else(|| default_pair.and_then(|d| d.2));
-
-    let harnesses = if catalog.harnesses.is_empty() {
-        vec![crate::ipc::TraycerHarnessInfo {
-            id: pref_harness.clone(),
-            label: pref_harness.clone(),
-            models: pref_model
-                .clone()
-                .map(|m| {
-                    vec![crate::ipc::TraycerModelInfo {
-                        id: m,
-                        reasoning_efforts: pref_effort.clone().into_iter().collect(),
-                        fast_mode_available: false,
-                    }]
-                })
-                .unwrap_or_default(),
-        }]
-    } else {
-        catalog.harnesses
-    };
-
-    let h_labels: Vec<String> = harnesses
-        .iter()
-        .map(|h| format!("{} ({})", h.label, h.id))
-        .collect();
-    let h_refs: Vec<&str> = h_labels.iter().map(|s| s.as_str()).collect();
-    let harness_dd = gtk4::DropDown::from_strings(&h_refs);
-    let h_init = harnesses
-        .iter()
-        .position(|h| h.id == pref_harness)
-        .unwrap_or(0);
-    harness_dd.set_selected(h_init as u32);
-    harness_dd.set_valign(gtk4::Align::Center);
-
-    let harness_row = adw::ActionRow::builder().title("Harness").build();
-    harness_row.add_suffix(&harness_dd);
-
-    let model_dd = gtk4::DropDown::from_strings(&[]);
-    model_dd.set_valign(gtk4::Align::Center);
-    let model_row = adw::ActionRow::builder().title("Modelo").build();
-    model_row.add_suffix(&model_dd);
-
-    let effort_dd = gtk4::DropDown::from_strings(&[]);
-    effort_dd.set_valign(gtk4::Align::Center);
-    let effort_row = adw::ActionRow::builder().title("Raciocínio").build();
-    effort_row.add_suffix(&effort_dd);
-
-    agent_group.add(&harness_row);
-    agent_group.add(&model_row);
-    agent_group.add(&effort_row);
-    content.append(&agent_group);
-
-    let harnesses_rc = Rc::new(harnesses);
-    let cur_models: Rc<RefCell<Vec<crate::ipc::TraycerModelInfo>>> =
-        Rc::new(RefCell::new(Vec::new()));
-    let cur_efforts: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-
-    let sync_efforts = {
-        let cur_efforts = cur_efforts.clone();
-        let effort_dd = effort_dd.clone();
-        let effort_row = effort_row.clone();
-        move |efforts: &[String], pref: Option<&str>| {
-            *cur_efforts.borrow_mut() = efforts.to_vec();
-            if efforts.is_empty() {
-                effort_row.set_visible(false);
-            } else {
-                let refs: Vec<&str> = efforts.iter().map(|s| s.as_str()).collect();
-                let sl = gtk4::StringList::new(&refs);
-                effort_dd.set_model(Some(&sl));
-                let idx = pref
-                    .and_then(|p| efforts.iter().position(|e| e == p))
-                    .or_else(|| efforts.iter().position(|e| e == "high"))
-                    .unwrap_or(0);
-                effort_dd.set_selected(idx as u32);
-                effort_row.set_visible(true);
-            }
-        }
-    };
-
-    let sync_models = {
-        let harnesses_rc = harnesses_rc.clone();
-        let cur_models = cur_models.clone();
-        let model_dd = model_dd.clone();
-        let sync_efforts = sync_efforts.clone();
-        move |h_idx: usize, p_model: Option<&str>, p_effort: Option<&str>| {
-            let models = harnesses_rc
-                .get(h_idx)
-                .map(|h| h.models.clone())
-                .unwrap_or_default();
-            *cur_models.borrow_mut() = models.clone();
-            let refs: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-            let sl = gtk4::StringList::new(&refs);
-            model_dd.set_model(Some(&sl));
-            if let Some(m) = models.first() {
-                let idx = p_model
-                    .and_then(|pm| models.iter().position(|x| x.id == pm))
-                    .unwrap_or(0);
-                model_dd.set_selected(idx as u32);
-                sync_efforts(&models.get(idx).unwrap_or(m).reasoning_efforts, p_effort);
-            } else {
-                sync_efforts(&[], None);
-            }
-        }
-    };
-
-    sync_models(h_init, pref_model.as_deref(), pref_effort.as_deref());
-
-    {
-        let sync_models = sync_models.clone();
-        harness_dd.connect_selected_notify(move |dd| {
-            sync_models(dd.selected() as usize, None, None);
-        });
-    }
-    {
-        let cur_models = cur_models.clone();
-        let sync_efforts = sync_efforts.clone();
-        model_dd.connect_selected_notify(move |dd| {
-            let models = cur_models.borrow();
-            if let Some(m) = models.get(dd.selected() as usize) {
-                sync_efforts(&m.reasoning_efforts, None);
-            }
-        });
-    }
-
     let dlg_toolbar = adw::ToolbarView::new();
     dlg_toolbar.add_top_bar(&header);
     dlg_toolbar.set_content(Some(&content));
@@ -1617,9 +1487,6 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
     {
         let ctrl = ctrl.clone();
         let dialog = dialog.clone();
-        let harnesses_rc = harnesses_rc.clone();
-        let cur_models = cur_models.clone();
-        let cur_efforts = cur_efforts.clone();
         create_btn.connect_clicked(move |_| {
             let title = title_row.text().trim().to_string();
             let slug = slugify(slug_row.text().trim());
@@ -1631,86 +1498,27 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
                 return;
             }
 
-            let h_id = harnesses_rc
-                .get(harness_dd.selected() as usize)
-                .map(|h| h.id.clone())
-                .unwrap_or_else(|| "antigravity".to_string());
-            let m_id = cur_models
-                .borrow()
-                .get(model_dd.selected() as usize)
-                .map(|m| m.id.clone())
-                .unwrap_or_default();
-            let eff = if effort_row.is_visible() {
-                cur_efforts
-                    .borrow()
-                    .get(effort_dd.selected() as usize)
-                    .cloned()
-            } else {
-                None
-            };
-
-            let agent_cfg = if !m_id.is_empty() {
-                Some(PanoramaAgentConfig {
-                    agent_id: None,
-                    epic_id: None,
-                    harness_id: h_id.clone(),
-                    model: m_id.clone(),
-                    reasoning_effort: eff.clone(),
-                    last_requested_at: None,
-                    last_status: Some("Iniciando agente dedicado...".to_string()),
-                })
-            } else {
-                None
-            };
-
             match init_project(
                 &ctrl.projects_dir,
                 InitOptions {
                     slug: slug.clone(),
                     title: title.clone(),
-                    path: path.clone(),
+                    path,
                     progresso: 0.0,
                     confianca: 50.0,
                     phase,
-                    agent: agent_cfg,
+                    agent: None,
                     hardware: None,
                 },
             ) {
                 Ok(_) => {
-                    let mut st = load_state(&ctrl.projects_dir);
-                    st.default_harness = Some(h_id.clone());
-                    if !m_id.is_empty() {
-                        st.default_model = Some(m_id.clone());
-                    }
-                    st.default_reasoning_effort = eff.clone();
-                    let _ = save_state(&ctrl.projects_dir, &st);
-
-                    *ctrl.selected_slug.borrow_mut() = Some(slug.clone());
+                    *ctrl.selected_slug.borrow_mut() = Some(slug);
                     dialog.close();
                     reload_from_disk(&ctrl, true);
-
-                    if !m_id.is_empty() {
-                        show_toast(
-                            &ctrl,
-                            &format!("Panorama `{title}` criado. Iniciando agente ({h_id} · {m_id})..."),
-                        );
-                        let pdir = ctrl.projects_dir.clone();
-                        let tx = ctrl.tx.clone();
-                        std::thread::spawn(move || {
-                            let res = client::start_panorama_agent(
-                                &pdir,
-                                &slug,
-                                &title,
-                                &path,
-                                &h_id,
-                                &m_id,
-                                eff.as_deref(),
-                            );
-                            let _ = tx.send(GuiEvent::AgentFinished { slug, result: res });
-                        });
-                    } else {
-                        show_toast(&ctrl, &format!("Panorama `{title}` criado."));
-                    }
+                    show_toast(
+                        &ctrl,
+                        &format!("Panorama `{title}` criado. Peça ao maestro da conversa no Traycer para vincular o subagente."),
+                    );
                 }
                 Err(err) => {
                     show_toast(&ctrl, &format!("Erro ao criar panorama: {err}"));
@@ -1721,7 +1529,6 @@ fn open_new_panorama_dialog(ctrl: &Rc<AppController>) {
 
     dialog.present(Some(&ctrl.window));
 }
-
 fn slugify(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;

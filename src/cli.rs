@@ -4,7 +4,7 @@ use crate::schema::SCHEMA_SPEC;
 use crate::store::{
     apply_project_json, delete_project, init_project, load_all_projects, move_project_in_order,
     project_file_path, read_project_file, resolve_projects_dir, set_project_archived,
-    update_project_hardware, InitOptions,
+    update_project_agent, update_project_hardware, InitOptions,
 };
 use crate::traycer_bridge::pick_default_model;
 use std::fs;
@@ -58,6 +58,14 @@ pub enum Command {
     Update {
         slug: String,
     },
+    SetAgent {
+        slug: String,
+        agent_id: String,
+        epic_id: String,
+        harness: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    },
     Limits {
         slug: String,
         cpu_cores: Option<u32>,
@@ -76,10 +84,12 @@ pub fn usage_text() -> &'static str {
         "  panorama schema                            Imprime a especificação JSON completa\n",
         "  panorama list [--all | --archived]         Lista projetos (ativos por padrão)\n",
         "  panorama models                            Lista harnesses e modelos do Traycer\n",
-        "  panorama init <slug> --title \"...\" [opções] Cria projeto + inicia agente dedicado\n",
+        "  panorama init <slug> --title \"...\" [opções] Cria o registro JSON do projeto\n",
+        "  panorama set-agent <slug> --agent-id ID --epic-id ID [--harness H] [--model M] [--reasoning-effort E]\n",
+        "                                             Vincula o subagente criado pelo maestro\n",
         "  panorama apply <slug> [arquivo.json | -]   Valida e grava JSON atomicamente\n",
         "  panorama validate <arquivo.json | ->       Valida um JSON sem salvar\n",
-        "  panorama update <slug>                     Pede ao agente dedicado para atualizar\n",
+        "  panorama update <slug>                     Pede ao subagente dedicado para atualizar\n",
         "  panorama archive <slug>                    Arquiva o projeto\n",
         "  panorama unarchive <slug>                  Restaura um projeto arquivado\n",
         "  panorama delete <slug> --yes               Deleta permanentemente o projeto\n",
@@ -96,7 +106,7 @@ pub fn usage_text() -> &'static str {
         "  --harness <id>                             Harness Traycer do agente dedicado\n",
         "  --model <id>                               Modelo Traycer do agente dedicado\n",
         "  --reasoning-effort <nivel>                 Esforço de raciocínio (se suportado)\n",
-        "  --no-agent                                 Apenas cria o JSON sem iniciar agente\n",
+        "  --no-agent                                 Mantido por compatibilidade (init não cria tarefa avulsa)\n",
     )
 }
 
@@ -166,6 +176,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, String> {
                 slug: args[1].clone(),
             })
         }
+        "set-agent" => parse_set_agent_args(&args[1..]),
         "limits" => parse_limits_args(&args[1..]),
         other => Err(format!(
             "Subcomando desconhecido `{other}`. Execute `panorama --help`."
@@ -274,6 +285,68 @@ fn parse_init_args(rest: &[String]) -> Result<Command, String> {
         model,
         reasoning_effort,
         no_agent,
+    })
+}
+
+fn parse_set_agent_args(rest: &[String]) -> Result<Command, String> {
+    if rest.is_empty() {
+        return Err("Uso: `panorama set-agent <slug> --agent-id <id> --epic-id <id> [--harness H] [--model M] [--reasoning-effort E]`".to_string());
+    }
+    let slug = rest[0].clone();
+    let mut agent_id: Option<String> = None;
+    let mut epic_id: Option<String> = None;
+    let mut harness: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut reasoning_effort: Option<String> = None;
+
+    let next_val = |idx: usize, flag: &str| -> Result<String, String> {
+        rest.get(idx + 1)
+            .cloned()
+            .ok_or_else(|| format!("Falta valor após `{flag}`"))
+    };
+
+    let mut i = 1;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        match flag {
+            "--agent-id" => {
+                agent_id = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--epic-id" | "--task-id" => {
+                epic_id = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--harness" => {
+                harness = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--model" => {
+                model = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            "--reasoning-effort" | "--effort" => {
+                reasoning_effort = Some(next_val(i, flag)?);
+                i += 2;
+            }
+            unknown => return Err(format!("Opção desconhecida em `set-agent`: `{unknown}`")),
+        }
+    }
+
+    let Some(agent_id) = agent_id.filter(|v| !v.trim().is_empty()) else {
+        return Err("`panorama set-agent` requer `--agent-id <id>`.".to_string());
+    };
+    let Some(epic_id) = epic_id.filter(|v| !v.trim().is_empty()) else {
+        return Err("`panorama set-agent` requer `--epic-id <id>`.".to_string());
+    };
+
+    Ok(Command::SetAgent {
+        slug,
+        agent_id,
+        epic_id,
+        harness,
+        model,
+        reasoning_effort,
     })
 }
 
@@ -438,7 +511,7 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             harness,
             model,
             reasoning_effort,
-            no_agent,
+            no_agent: _,
         } => {
             let initial_agent = match (&harness, &model) {
                 (Some(h), Some(m)) => Some(PanoramaAgentConfig {
@@ -448,7 +521,7 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
                     model: m.clone(),
                     reasoning_effort: reasoning_effort.clone(),
                     last_requested_at: None,
-                    last_status: None,
+                    last_status: Some("Aguardando vínculo do maestro no Traycer".to_string()),
                 }),
                 _ => None,
             };
@@ -457,7 +530,7 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
                 InitOptions {
                     slug: slug.clone(),
                     title: title.clone(),
-                    path: path.clone(),
+                    path,
                     progresso,
                     confianca,
                     phase,
@@ -466,64 +539,58 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
                 },
             )?;
 
-            let mut msg = format!(
-                "Projeto `{slug}` inicializado com sucesso em `{}`.",
+            Ok(format!(
+                "Projeto `{slug}` inicializado com sucesso em `{}`. Vincule o subagente da conversa com `panorama set-agent {slug} --agent-id <ID> --epic-id <EPIC>`.",
                 written.display()
-            );
+            ))
+        }
+        Command::SetAgent {
+            slug,
+            agent_id,
+            epic_id,
+            harness,
+            model,
+            reasoning_effort,
+        } => {
+            let path = project_file_path(dir, &slug);
+            let existing = read_project_file(&path).map_err(|e| e.to_string())?;
+            let prev_ag = existing.agent.as_ref();
 
-            if !no_agent {
-                let chosen = match (harness, model) {
-                    (Some(h), Some(m)) => Ok((h, m, reasoning_effort)),
-                    (h_opt, m_opt) => match client::list_traycer_models(false) {
-                        Ok(cat) => {
-                            if let Some(h) = h_opt {
-                                if let Some(hi) = cat.harnesses.iter().find(|x| x.id == h) {
-                                    let chosen_m = m_opt
-                                        .or_else(|| hi.models.first().map(|mm| mm.id.clone()))
-                                        .ok_or_else(|| format!("Harness `{h}` sem modelos."))?;
-                                    Ok((h, chosen_m, reasoning_effort))
-                                } else {
-                                    Err(format!("Harness `{h}` não encontrado no Traycer."))
-                                }
-                            } else {
-                                pick_default_model(&cat)
-                                    .ok_or_else(|| "Nenhum modelo disponível no Traycer.".to_string())
-                            }
-                        }
-                        Err(e) => Err(e),
-                    },
-                };
+            let fallback_pair = if harness.is_none() || model.is_none() {
+                client::list_traycer_models(false)
+                    .ok()
+                    .and_then(|cat| pick_default_model(&cat))
+            } else {
+                None
+            };
 
-                match chosen {
-                    Ok((h, m, eff)) => {
-                        match client::start_panorama_agent(
-                            dir,
-                            &slug,
-                            &title,
-                            &path,
-                            &h,
-                            &m,
-                            eff.as_deref(),
-                        ) {
-                            Ok(res) => {
-                                msg.push_str(&format!("\n{}", res.message));
-                            }
-                            Err(e) => {
-                                msg.push_str(&format!(
-                                    "\nAviso: JSON criado, mas não foi possível iniciar o agente dedicado ({e})."
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        msg.push_str(&format!(
-                            "\nAviso: JSON criado sem agente ativo ({e})."
-                        ));
-                    }
-                }
-            }
+            let eff_harness = harness
+                .or_else(|| prev_ag.map(|a| a.harness_id.clone()).filter(|s| !s.is_empty()))
+                .or_else(|| fallback_pair.as_ref().map(|p| p.0.clone()))
+                .unwrap_or_else(|| "antigravity".to_string());
+            let eff_model = model
+                .or_else(|| prev_ag.map(|a| a.model.clone()).filter(|s| !s.is_empty()))
+                .or_else(|| fallback_pair.as_ref().map(|p| p.1.clone()))
+                .unwrap_or_else(|| "gemini-4-hydrogen".to_string());
+            let eff_reasoning = reasoning_effort
+                .or_else(|| prev_ag.and_then(|a| a.reasoning_effort.clone()))
+                .or_else(|| fallback_pair.and_then(|p| p.2));
 
-            Ok(msg)
+            let cfg = PanoramaAgentConfig {
+                agent_id: Some(agent_id.clone()),
+                epic_id: Some(epic_id.clone()),
+                harness_id: eff_harness.clone(),
+                model: eff_model.clone(),
+                reasoning_effort: eff_reasoning.clone(),
+                last_requested_at: prev_ag.and_then(|a| a.last_requested_at.clone()),
+                last_status: Some(format!(
+                    "Subagente vinculado ({eff_harness} · {eff_model})"
+                )),
+            };
+            update_project_agent(dir, &slug, cfg)?;
+            Ok(format!(
+                "Subagente `{agent_id}` (epic `{epic_id}`, {eff_harness} · {eff_model}) vinculado ao panorama `{slug}`."
+            ))
         }
         Command::Apply { slug, source } => {
             let raw = read_input_source(source.as_deref())?;
@@ -798,6 +865,33 @@ mod tests {
         )
         .expect("validate ok");
         assert!(out_val.contains("JSON válido"));
+
+        let sa_cmd = parse_cli_args(&[
+            "set-agent".into(),
+            "alpha".into(),
+            "--agent-id".into(),
+            "agent-123".into(),
+            "--epic-id".into(),
+            "epic-456".into(),
+            "--harness".into(),
+            "antigravity".into(),
+            "--model".into(),
+            "gemini-4-hydrogen".into(),
+            "--reasoning-effort".into(),
+            "high".into(),
+        ])
+        .expect("parse set-agent ok");
+        let out_sa = execute_non_gui_in_dir(sa_cmd, &tmp).expect("set-agent ok");
+        assert!(out_sa.contains("agent-123"));
+        let doc_sa = read_project_file(&json_path).expect("read after set-agent");
+        assert_eq!(
+            doc_sa.agent.as_ref().and_then(|a| a.agent_id.as_deref()),
+            Some("agent-123")
+        );
+        assert_eq!(
+            doc_sa.agent.as_ref().and_then(|a| a.epic_id.as_deref()),
+            Some("epic-456")
+        );
 
         execute_non_gui_in_dir(
             Command::Delete {

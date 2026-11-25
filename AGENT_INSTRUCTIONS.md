@@ -63,6 +63,16 @@ Use ícones simbólicos do GNOME nas abas, nos `cards` e nos `expander`s (ex.: `
   - `confianca_fatores` / `confianca_riscos`: frases simples, sem jargão. Ficam recolhidas em "O que dá segurança" e "O que ainda preocupa".
 - `subtitle` e `phase` também em linguagem simples ("Fase atual: corrigindo a gravação do mundo").
 
+## 5.1 Fluxo do Agente Dedicado (Maestro → Subagente na aba Agents)
+
+Cada projeto tem sua própria conversa (task/epic) no Traycer. **O maestro dessa conversa** (e não um botão solto fora do chat) deve criar o subagente dedicado do panorama na aba **Agents** usando `traycer_create_agent`, instruí-lo com `traycer_send_message` e vinculá-lo ao painel executando:
+
+```bash
+panorama set-agent <slug> --agent-id <ID_DO_SUBAGENTE> --epic-id <ID_DA_CONVERSA> --harness <harness> --model <modelo> [--reasoning-effort <nivel>]
+```
+
+Depois disso, o usuário poderá trocar o modelo do subagente diretamente no painel e clicar em **Atualizar** para enviar pedidos de atualização para esse subagente.
+
 ## 6. Quando atualizar
 
 Atualize o painel sempre que:
@@ -80,7 +90,8 @@ Binários em `/home/sacer/.local/bin/`.
 - `panorama schema`: imprime a especificação completa com exemplos de todos os blocos.
 - `panorama list [--all | --archived]`: lista os projetos (ativos por padrão).
 - `panorama models`: lista harnesses e modelos disponíveis no Traycer.
-- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."] [--harness id] [--model id] [--no-agent]`: cria o projeto e inicia seu agente dedicado no Traycer.
+- `panorama init <slug> --title "..." [--path "..."] [--progresso 0] [--confianca 50] [--phase "..."]`: cria o registro JSON do projeto.
+- `panorama set-agent <slug> --agent-id <id> --epic-id <id> [--harness id] [--model id] [--reasoning-effort nivel]`: vincula o subagente criado pelo maestro da conversa no Traycer ao panorama do projeto.
 - `panorama validate <arquivo.json>`: valida o JSON (campos, faixas, cores, referências).
 - `panorama apply <slug> [arquivo.json | -]`: valida, anexa um ponto ao histórico, calcula as variações e grava de forma atômica (preservando `archived`, `agent` e limites de `hardware`).
 - `panorama update <slug>`: pede ao agente dedicado para reinspecionar o projeto e atualizar o panorama.

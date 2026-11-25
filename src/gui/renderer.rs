@@ -208,7 +208,7 @@ fn build_dedicated_agent_card(
         l.add_css_class("pill-pass");
         l
     } else {
-        let l = gtk4::Label::new(Some("Não iniciado"));
+        let l = gtk4::Label::new(Some("Aguardando maestro"));
         l.add_css_class("mini-pill");
         l.add_css_class("pill-pend");
         l
@@ -230,7 +230,11 @@ fn build_dedicated_agent_card(
         }
     }
     if sub_parts.is_empty() {
-        sub_parts.push("Monta este panorama do zero, monitora o projeto e atualiza quando você clicar em Atualizar.".to_string());
+        if has_agent {
+            sub_parts.push("Subagente dedicado vinculado à conversa do projeto no Traycer. Atualiza este panorama quando você clicar em Atualizar.".to_string());
+        } else {
+            sub_parts.push("O maestro da conversa deste projeto no Traycer cria este subagente na aba Agents e o vincula a este panorama.".to_string());
+        }
     }
     let sub_lbl = gtk4::Label::new(Some(&sub_parts.join(" · ")));
     sub_lbl.add_css_class("caption");
@@ -251,16 +255,21 @@ fn build_dedicated_agent_card(
     });
     top.append(&refresh_models_btn);
 
-    let update_now_btn = gtk4::Button::builder()
-        .label("Pedir Atualização")
+    let update_now_content = adw::ButtonContent::builder()
         .icon_name("view-refresh-symbolic")
+        .label("Pedir Atualização")
+        .build();
+    let update_now_btn = gtk4::Button::builder()
+        .child(&update_now_content)
         .valign(gtk4::Align::Center)
         .build();
-    update_now_btn.set_tooltip_text(Some("Enviar pedido ao agente dedicado para atualizar este panorama"));
+    update_now_btn.set_tooltip_text(Some("Enviar pedido ao subagente dedicado para atualizar este panorama"));
     let on_req = callbacks.on_request_update.clone();
     update_now_btn.connect_clicked(move |_| {
         on_req();
     });
+    update_now_btn.set_visible(has_agent);
+    refresh_models_btn.set_visible(has_agent);
     top.append(&update_now_btn);
     card.append(&top);
 
@@ -328,12 +337,9 @@ fn build_dedicated_agent_card(
     effort_dd.set_tooltip_text(Some("Nível de raciocínio suportado pelo modelo"));
 
     let apply_btn = gtk4::Button::builder()
-        .label(if has_agent { "Aplicar Modelo" } else { "Iniciar Agente" })
+        .label("Aplicar Modelo")
         .valign(gtk4::Align::Center)
         .build();
-    if !has_agent {
-        apply_btn.add_css_class("suggested-action");
-    }
 
     let harnesses_rc = Rc::new(harnesses);
     let current_models: Rc<RefCell<Vec<crate::ipc::TraycerModelInfo>>> =
@@ -477,6 +483,7 @@ fn build_dedicated_agent_card(
     controls.append(&model_dd);
     controls.append(&effort_dd);
     controls.append(&apply_btn);
+    controls.set_visible(has_agent);
     card.append(&controls);
 
     card.upcast()
