@@ -20,7 +20,7 @@
   - **Confiança (%)**: métrica honesta de viabilidade técnica, fatores de segurança e riscos monitorados.
 
 ### 🤖 Agentes Dedicados e Integração Traycer
-- **Subagentes vinculados à conversa do projeto**: o maestro cria o subagente dedicado na aba *Agents* do Traycer e vincula ao panorama (`panorama set-agent`).
+- **Subagentes vinculados à conversa do projeto**: ao iniciar um projeto novo no panorama, o agente primeiro pergunta ao usuário qual **modelo** e **effort** usar (consultando `panorama models`), cria o subagente dedicado na aba *Agents* do Traycer e vincula ao panorama (`panorama set-agent`).
 - **Configuração em tempo de execução**: escolha qualquer harness disponível no Traycer (**Antigravity**, **Codex**, **Hermes Agent**), modelo e nível de raciocínio (*effort*: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`).
 - **Botão "Pedir Atualização"**: envia instruções ao agente dedicado via WebSocket/IPC local para reinspecionar o repositório (`git status`, testes, logs) e reemitir o estado atualizado.
 - **Ciclo de vida sincronizado**: arquivamento e desarquivamento de projetos no panorama sincronizam automaticamente com o agente no Traycer.
@@ -110,7 +110,8 @@ panorama init meu-projeto \
   --confianca 80 \
   --phase "Fase 1: Protótipo"
 
-# Vincular o subagente dedicado criado no Traycer
+# Antes de criar o subagente para um projeto novo, pergunte ao usuário qual modelo e effort usar
+# (consulte `panorama models`) e então vincule o subagente criado no Traycer:
 panorama set-agent meu-projeto \
   --agent-id "7161daf3-1d7b-4f1d-a684-51c8a944cd4c" \
   --epic-id "f4800439-32f0-4c7c-bf3f-316838746f25" \
@@ -144,7 +145,8 @@ panorama apply meu-projeto meu-projeto.json
 
 ## 📄 Regras de Redação para Agentes
 
-Consulte o documento completo em [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) para detalhes de como os agentes devem preencher os panoramas:
+Consulte o documento completo em [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) para detalhes de como os agentes devem criar e preencher os panoramas:
+- **Perguntar modelo e effort em projeto novo**: antes de criar o subagente dedicado, o agente deve perguntar ao usuário qual harness/modelo e qual nível de `reasoningEffort` deseja usar.
 - **Linguagem simples e direta**: frases curtas sem jargão hermético no texto principal.
 - **Divisão em 3 camadas**: visão rápida em até 30 segundos, explicações em expanders e detalhes técnicos isolados no rodapé.
 - **Sem metáforas nem dados inventados**: medições reais baseadas no código e testes verificados.

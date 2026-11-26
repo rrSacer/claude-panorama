@@ -8,6 +8,7 @@ Comando recomendado para validar + anexar histórico + gravar atomicamente (`066
   `panorama apply <slug> - <<'EOF' ... EOF`
 
 Regras obrigatórias de conteúdo (leia `AGENT_INSTRUCTIONS.md` do projeto claude-panorama para a versão completa):
+0. PROJETO NOVO → PERGUNTE MODELO E EFFORT ANTES: antes de criar o subagente dedicado de um projeto novo, execute `panorama models` (ou `traycer_list_harness_models`) e PERGUNTE ao usuário qual harness/modelo e qual effort (`reasoningEffort`) usar; nunca escolha um padrão silenciosamente.
 1. O LEITOR NÃO SABE NADA DO PROJETO: o painel deve explicar o que é, como funciona, quanto está pronto, o que está acontecendo agora e o que preocupa.
 2. LINGUAGEM SIMPLES: sem nomes de classe, struct, função, arquivo, commit, flag ou caminho no texto visível. Diga o que a coisa faz. Termo técnico inevitável → explique na primeira vez e coloque no `glossary`.
 3. ZERO ANALOGIAS OU METÁFORAS: explique o mecanismo real em palavras simples.

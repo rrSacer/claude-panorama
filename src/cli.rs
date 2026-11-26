@@ -609,7 +609,7 @@ pub fn execute_non_gui_in_dir(cmd: Command, dir: &Path) -> Result<String, String
             )?;
 
             Ok(format!(
-                "Projeto `{slug}` inicializado com sucesso em `{}`. Vincule o subagente da conversa com `panorama set-agent {slug} --agent-id <ID> --epic-id <EPIC>`.",
+                "Projeto `{slug}` inicializado com sucesso em `{}`. Antes de criar o subagente dedicado, pergunte ao usuário qual modelo e qual effort usar (veja opções com `panorama models`) e depois vincule com `panorama set-agent {slug} --agent-id <ID> --epic-id <EPIC> --harness <H> --model <M> [--reasoning-effort <E>]`.",
                 written.display()
             ))
         }

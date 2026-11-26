@@ -2,6 +2,8 @@
 
 Todo projeto conduzido pelo Claude (ou pelo Maestro e seus subagentes) DEVE criar e manter atualizado o seu painel no **Claude Panorama**. O painel é um arquivo JSON em `/home/sacer/.local/share/claude-panorama/projects/<slug>.json`, gravado com a CLI `panorama`. O app nativo do GNOME o mostra e recarrega sozinho quando o arquivo muda.
 
+> **REGRA OBRIGATÓRIA PARA PROJETO NOVO:** Antes de criar o subagente dedicado de um **projeto novo** no Panorama, **PERGUNTE PRIMEIRO ao usuário** qual **harness + modelo** e qual **effort** (`reasoningEffort`) ele quer usar nesse subagente (veja seção 5.1). **Nunca** escolha modelo/effort silenciosamente por conta própria ao iniciar um panorama novo.
+
 ## 1. Para quem o painel é escrito
 
 O leitor é **alguém que não sabe nada do projeto**. Ele abre o painel e precisa sair entendendo:
@@ -65,13 +67,17 @@ Use ícones simbólicos do GNOME nas abas, nos `cards` e nos `expander`s (ex.: `
 
 ## 5.1 Fluxo do Agente Dedicado (Maestro → Subagente na aba Agents)
 
-Cada projeto tem sua própria conversa (task/epic) no Traycer. **O maestro dessa conversa** (e não um botão solto fora do chat) deve criar o subagente dedicado do panorama na aba **Agents** usando `traycer_create_agent`, instruí-lo com `traycer_send_message` e vinculá-lo ao painel executando:
+Cada projeto tem sua própria conversa (task/epic) no Traycer. **O maestro dessa conversa** (e não um botão solto fora do chat) cria o subagente dedicado do panorama na aba **Agents**, seguindo esta ordem obrigatória para todo **projeto novo**:
+
+1. **Consultar opções válidas**: execute `panorama models` (ou `traycer_list_harness_models`) para listar os harnesses, modelos e níveis de `reasoningEffort` disponíveis no momento.
+2. **Perguntar ao usuário ANTES de criar o subagente**: pergunte explicitamente qual **harness + modelo** e qual **effort** (`low`, `medium`, `high`, `xhigh`, `max`, `ultra` — quando suportado pelo modelo; harnesses como `hermes` não usam effort) ele deseja usar para o subagente dedicado deste panorama. **Não crie o subagente com um modelo/effort escolhido por suposição.**
+3. **Criar e instruir com a escolha do usuário**: após a resposta do usuário, crie o subagente com `traycer_create_agent` usando exatamente o `harnessId`, `model` e `reasoningEffort` escolhidos, instrua-o com `traycer_send_message` e vincule-o ao painel executando:
 
 ```bash
 panorama set-agent <slug> --agent-id <ID_DO_SUBAGENTE> --epic-id <ID_DA_CONVERSA> --harness <harness> --model <modelo> [--reasoning-effort <nivel>]
 ```
 
-Depois disso, o usuário poderá trocar o modelo do subagente diretamente no painel e clicar em **Atualizar** para enviar pedidos de atualização para esse subagente.
+Depois disso, o usuário poderá trocar o modelo e o effort do subagente diretamente no painel e clicar em **Atualizar** para enviar pedidos de atualização para esse subagente.
 
 ## 6. Quando atualizar
 
