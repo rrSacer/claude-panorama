@@ -1,6 +1,6 @@
 use crate::ipc::{AgentActionResult, TraycerCatalog, TraycerHarnessInfo, TraycerModelInfo};
 use crate::model::PanoramaAgentConfig;
-use crate::store::{now_iso, update_project_agent};
+use crate::store::{now_iso, project_file_path, read_project_file, update_project_agent};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -147,47 +147,98 @@ fn parse_models_payload(mdata: Value) -> Vec<TraycerModelInfo> {
         .unwrap_or_default()
 }
 
+pub fn harness_sort_rank(id: &str) -> usize {
+    match id {
+        "antigravity" => 0,
+        "codex" => 1,
+        "claude" => 2,
+        "hermes" => 3,
+        _ => 4,
+    }
+}
+
+pub fn sort_harnesses(harnesses: &mut [TraycerHarnessInfo]) {
+    harnesses.sort_by(|a, b| {
+        harness_sort_rank(&a.id)
+            .cmp(&harness_sort_rank(&b.id))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn parse_candidate_harnesses(data: &Value) -> Vec<(String, String)> {
+    data["harnesses"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|h| {
+                    let available = h["available"].as_bool().unwrap_or(false);
+                    let pending = h["availabilityPending"].as_bool().unwrap_or(false);
+                    let has_error = match &h["error"] {
+                        Value::Null => false,
+                        Value::String(s) => !s.trim().is_empty(),
+                        _ => true,
+                    };
+                    if (!available && !pending) || has_error {
+                        return None;
+                    }
+                    let id = h["id"].as_str()?.trim().to_string();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let label = h["label"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&id)
+                        .to_string();
+                    Some((id, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn list_traycer_catalog() -> Result<TraycerCatalog, String> {
     let data = run_traycer_cli_json(&["agent", "list-harnesses", "--json"], None)?;
-    let raw_harnesses = data["harnesses"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let candidates = parse_candidate_harnesses(&data);
 
-    let mut harnesses = Vec::new();
-    for h in raw_harnesses {
-        let available = h["available"].as_bool().unwrap_or(false);
-        if !available {
-            continue;
-        }
-        let Some(id) = h["id"].as_str().map(|s| s.to_string()) else {
-            continue;
-        };
-        let label = h["label"].as_str().unwrap_or(&id).to_string();
+    let mut harnesses: Vec<TraycerHarnessInfo> = std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .into_iter()
+            .map(|(id, label)| {
+                scope.spawn(move || {
+                    let delays_ms = [0u64, 350, 700];
+                    let mut models = Vec::new();
+                    for delay in delays_ms {
+                        if delay > 0 {
+                            std::thread::sleep(Duration::from_millis(delay));
+                        }
+                        if let Ok(mdata) = run_traycer_cli_json(
+                            &["agent", "list-harness-models", &id, "--json"],
+                            None,
+                        ) {
+                            models = parse_models_payload(mdata);
+                            if !models.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                    if models.is_empty() {
+                        None
+                    } else {
+                        Some(TraycerHarnessInfo { id, label, models })
+                    }
+                })
+            })
+            .collect();
 
-        let mut models = match run_traycer_cli_json(
-            &["agent", "list-harness-models", &id, "--json"],
-            None,
-        ) {
-            Ok(mdata) => parse_models_payload(mdata),
-            Err(_) => Vec::new(),
-        };
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok().flatten())
+            .collect()
+    });
 
-        // Em cold-start do host Traycer, tenta uma vez mais após breve espera
-        if models.is_empty() {
-            std::thread::sleep(Duration::from_millis(350));
-            if let Ok(mdata) =
-                run_traycer_cli_json(&["agent", "list-harness-models", &id, "--json"], None)
-            {
-                models = parse_models_payload(mdata);
-            }
-        }
-
-        if !models.is_empty() {
-            harnesses.push(TraycerHarnessInfo { id, label, models });
-        }
-    }
-
+    sort_harnesses(&mut harnesses);
     Ok(TraycerCatalog { harnesses })
 }
 
@@ -351,14 +402,22 @@ pub fn configure_panorama_agent(
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_traycer_cli_json(&arg_refs, Some((epic, agent_id)))?;
 
+    let prev_requested_at = read_project_file(&project_file_path(projects_dir, slug))
+        .ok()
+        .and_then(|d| d.agent)
+        .and_then(|a| a.last_requested_at);
+    let eff_label = reasoning_effort
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" · {s}"))
+        .unwrap_or_default();
     let cfg = PanoramaAgentConfig {
         agent_id: Some(agent_id.to_string()),
         epic_id: Some(epic.to_string()),
         harness_id: harness_id.to_string(),
         model: model.to_string(),
         reasoning_effort: reasoning_effort.map(|s| s.to_string()),
-        last_requested_at: None,
-        last_status: Some(format!("Modelo atualizado para {harness_id} · {model}")),
+        last_requested_at: prev_requested_at,
+        last_status: Some(format!("Modelo atualizado para {harness_id} · {model}{eff_label}")),
     };
     let _ = update_project_agent(projects_dir, slug, cfg.clone());
 
@@ -711,4 +770,43 @@ pub fn request_panorama_update(
         message: "Pedido de atualização enviado para o subagente dedicado.".to_string(),
         created_new: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_harnesses_includes_available_and_pending_and_skips_errors() {
+        let payload = json!({
+            "harnesses": [
+                {"id": "hermes", "label": "Hermes Agent", "available": true, "availabilityPending": false, "error": null},
+                {"id": "codex", "label": "Codex", "available": false, "availabilityPending": true, "error": null},
+                {"id": "antigravity", "label": "Antigravity", "available": true, "availabilityPending": true, "error": null},
+                {"id": "claude", "label": "Claude Code", "available": false, "availabilityPending": false, "error": "disabled"}
+            ]
+        });
+        let parsed = parse_candidate_harnesses(&payload);
+        assert_eq!(
+            parsed,
+            vec![
+                ("hermes".into(), "Hermes Agent".into()),
+                ("codex".into(), "Codex".into()),
+                ("antigravity".into(), "Antigravity".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_harnesses_prefers_antigravity_codex_claude_hermes() {
+        let mut hs = vec![
+            TraycerHarnessInfo { id: "hermes".into(), label: "Hermes Agent".into(), models: vec![] },
+            TraycerHarnessInfo { id: "custom".into(), label: "Custom".into(), models: vec![] },
+            TraycerHarnessInfo { id: "codex".into(), label: "Codex".into(), models: vec![] },
+            TraycerHarnessInfo { id: "antigravity".into(), label: "Antigravity".into(), models: vec![] },
+        ];
+        sort_harnesses(&mut hs);
+        let ids: Vec<_> = hs.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["antigravity", "codex", "hermes", "custom"]);
+    }
 }

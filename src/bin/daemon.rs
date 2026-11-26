@@ -134,6 +134,33 @@ fn main() {
         thread::sleep(Duration::from_secs(1));
     });
 
+    // Thread de warmup do catálogo Traycer no boot (com retry breve se vier parcial)
+    let warm_ctx = Arc::clone(&ctx);
+    thread::spawn(move || {
+        for attempt in 0..4 {
+            if let Ok(catalog) = traycer_bridge::list_traycer_catalog() {
+                let len = catalog.harnesses.len();
+                if !catalog.harnesses.is_empty() {
+                    if let Ok(mut guard) = warm_ctx.catalog.lock() {
+                        let should_update = guard
+                            .as_ref()
+                            .map(|(prev, _)| len >= prev.harnesses.len())
+                            .unwrap_or(true);
+                        if should_update {
+                            *guard = Some((catalog, Instant::now()));
+                        }
+                    }
+                }
+                if len >= 2 {
+                    break;
+                }
+            }
+            if attempt < 3 {
+                thread::sleep(Duration::from_secs(3));
+            }
+        }
+    });
+
     eprintln!(
         "claude-panorama-daemon ativo em {}",
         sock_path.display()
@@ -189,8 +216,12 @@ fn dispatch_request(req: DaemonRequest, ctx: &DaemonCtx) -> DaemonResponse {
             if !refresh {
                 if let Ok(guard) = ctx.catalog.lock() {
                     if let Some((cat, fetched_at)) = guard.as_ref() {
-                        if fetched_at.elapsed() < Duration::from_secs(120) && !cat.harnesses.is_empty()
-                        {
+                        let ttl = if cat.harnesses.len() >= 2 {
+                            Duration::from_secs(120)
+                        } else {
+                            Duration::from_secs(3)
+                        };
+                        if !cat.harnesses.is_empty() && fetched_at.elapsed() < ttl {
                             return DaemonResponse::Models {
                                 catalog: cat.clone(),
                             };
@@ -200,8 +231,10 @@ fn dispatch_request(req: DaemonRequest, ctx: &DaemonCtx) -> DaemonResponse {
             }
             match traycer_bridge::list_traycer_catalog() {
                 Ok(catalog) => {
-                    if let Ok(mut guard) = ctx.catalog.lock() {
-                        *guard = Some((catalog.clone(), Instant::now()));
+                    if !catalog.harnesses.is_empty() {
+                        if let Ok(mut guard) = ctx.catalog.lock() {
+                            *guard = Some((catalog.clone(), Instant::now()));
+                        }
                     }
                     DaemonResponse::Models { catalog }
                 }

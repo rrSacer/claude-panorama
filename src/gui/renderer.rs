@@ -254,7 +254,7 @@ fn build_dedicated_agent_card(
     let refresh_models_btn = gtk4::Button::from_icon_name("system-run-symbolic");
     refresh_models_btn.add_css_class("flat");
     refresh_models_btn.set_valign(gtk4::Align::Center);
-    refresh_models_btn.set_tooltip_text(Some("Recarregar modelos disponíveis no Traycer"));
+    refresh_models_btn.set_tooltip_text(Some("Recarregar harnesses, modelos e efforts disponíveis no Traycer"));
     let on_refresh_models = callbacks.on_refresh_models.clone();
     refresh_models_btn.connect_clicked(move |_| {
         on_refresh_models();
@@ -279,18 +279,19 @@ fn build_dedicated_agent_card(
     top.append(&update_now_btn);
     card.append(&top);
 
-    // Linha de seleção de Harness + Modelo + Esforço (Traycer)
-    let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    // Controles em 2 linhas: Harness + Modelo (linha 1) e Effort + Aplicar Modelo (linha 2)
+    let controls = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     controls.set_hexpand(true);
 
-    let mut harnesses = callbacks.catalog.harnesses.clone();
     let saved_harness = doc
         .agent
         .as_ref()
         .map(|a| a.harness_id.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            harnesses
+            callbacks
+                .catalog
+                .harnesses
                 .first()
                 .map(|h| h.id.clone())
                 .unwrap_or_else(|| "antigravity".to_string())
@@ -306,21 +307,12 @@ fn build_dedicated_agent_card(
         .as_ref()
         .and_then(|a| a.reasoning_effort.clone());
 
-    if harnesses.is_empty() {
-        harnesses.push(crate::ipc::TraycerHarnessInfo {
-            id: saved_harness.clone(),
-            label: saved_harness.clone(),
-            models: if saved_model.is_empty() {
-                vec![]
-            } else {
-                vec![crate::ipc::TraycerModelInfo {
-                    id: saved_model.clone(),
-                    reasoning_efforts: saved_effort.clone().into_iter().collect(),
-                    fast_mode_available: false,
-                }]
-            },
-        });
-    }
+    let harnesses = merge_catalog_with_saved(
+        &callbacks.catalog,
+        &saved_harness,
+        &saved_model,
+        saved_effort.as_deref(),
+    );
 
     let harness_labels: Vec<String> = harnesses
         .iter()
@@ -328,6 +320,7 @@ fn build_dedicated_agent_card(
         .collect();
     let harness_str_refs: Vec<&str> = harness_labels.iter().map(|s| s.as_str()).collect();
     let harness_dd = gtk4::DropDown::from_strings(&harness_str_refs);
+    harness_dd.set_valign(gtk4::Align::Center);
     harness_dd.set_tooltip_text(Some("Harness do agente no Traycer"));
     let initial_h_idx = harnesses
         .iter()
@@ -337,10 +330,54 @@ fn build_dedicated_agent_card(
 
     let model_dd = gtk4::DropDown::from_strings(&[]);
     model_dd.set_hexpand(true);
+    model_dd.set_valign(gtk4::Align::Center);
     model_dd.set_tooltip_text(Some("Modelo do Traycer usado pelo agente"));
 
-    let effort_dd = gtk4::DropDown::from_strings(&[]);
-    effort_dd.set_tooltip_text(Some("Nível de raciocínio suportado pelo modelo"));
+    // Evita que IDs muito longos (ex.: Hermes) alarguem o card; lista completa no popup
+    let model_btn_factory = gtk4::SignalListItemFactory::new();
+    model_btn_factory.connect_setup(|_, obj| {
+        if let Some(item) = obj.downcast_ref::<gtk4::ListItem>() {
+            let lbl = gtk4::Label::new(None);
+            lbl.set_xalign(0.0);
+            lbl.set_hexpand(true);
+            lbl.set_ellipsize(pango::EllipsizeMode::End);
+            item.set_child(Some(&lbl));
+        }
+    });
+    model_btn_factory.connect_bind(|_, obj| {
+        if let Some(item) = obj.downcast_ref::<gtk4::ListItem>() {
+            if let (Some(lbl), Some(so)) = (
+                item.child().and_downcast::<gtk4::Label>(),
+                item.item().and_downcast::<gtk4::StringObject>(),
+            ) {
+                lbl.set_text(&so.string());
+            }
+        }
+    });
+    let model_list_factory = gtk4::SignalListItemFactory::new();
+    model_list_factory.connect_setup(|_, obj| {
+        if let Some(item) = obj.downcast_ref::<gtk4::ListItem>() {
+            let lbl = gtk4::Label::new(None);
+            lbl.set_xalign(0.0);
+            item.set_child(Some(&lbl));
+        }
+    });
+    model_list_factory.connect_bind(|_, obj| {
+        if let Some(item) = obj.downcast_ref::<gtk4::ListItem>() {
+            if let (Some(lbl), Some(so)) = (
+                item.child().and_downcast::<gtk4::Label>(),
+                item.item().and_downcast::<gtk4::StringObject>(),
+            ) {
+                lbl.set_text(&so.string());
+            }
+        }
+    });
+    model_dd.set_factory(Some(&model_btn_factory));
+    model_dd.set_list_factory(Some(&model_list_factory));
+
+    let effort_dd = gtk4::DropDown::from_strings(&["Padrão (N/A)"]);
+    effort_dd.set_valign(gtk4::Align::Center);
+    effort_dd.set_tooltip_text(Some("Nível de reasoning effort do modelo"));
 
     let apply_btn = gtk4::Button::builder()
         .label("Aplicar Modelo")
@@ -358,10 +395,15 @@ fn build_dedicated_agent_card(
         let effort_dd = effort_dd.clone();
         move |efforts: &[String], preferred: Option<&str>| {
             *current_efforts.borrow_mut() = efforts.to_vec();
+            effort_dd.set_visible(true);
             if efforts.is_empty() {
-                let empty_model = gtk4::StringList::new(&[]);
-                effort_dd.set_model(Some(&empty_model));
-                effort_dd.set_visible(false);
+                let na_model = gtk4::StringList::new(&["Padrão (N/A)"]);
+                effort_dd.set_model(Some(&na_model));
+                effort_dd.set_selected(0);
+                effort_dd.set_sensitive(false);
+                effort_dd.set_tooltip_text(Some(
+                    "Este harness/modelo não usa seleção de reasoning effort",
+                ));
             } else {
                 let refs: Vec<&str> = efforts.iter().map(|s| s.as_str()).collect();
                 let list = gtk4::StringList::new(&refs);
@@ -371,7 +413,8 @@ fn build_dedicated_agent_card(
                     .or_else(|| efforts.iter().position(|e| e == "high"))
                     .unwrap_or(0);
                 effort_dd.set_selected(idx as u32);
-                effort_dd.set_visible(true);
+                effort_dd.set_sensitive(true);
+                effort_dd.set_tooltip_text(Some("Nível de reasoning effort suportado pelo modelo"));
             }
         }
     };
@@ -473,7 +516,7 @@ fn build_dedicated_agent_card(
             let Some(m) = models.get(m_idx) else {
                 return;
             };
-            let eff = if effort_dd.is_visible() {
+            let eff = if effort_dd.is_sensitive() {
                 current_efforts
                     .borrow()
                     .get(effort_dd.selected() as usize)
@@ -485,10 +528,36 @@ fn build_dedicated_agent_card(
         });
     }
 
-    controls.append(&harness_dd);
-    controls.append(&model_dd);
-    controls.append(&effort_dd);
-    controls.append(&apply_btn);
+    let row1 = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    row1.set_hexpand(true);
+    let harness_lbl = gtk4::Label::new(Some("Harness"));
+    harness_lbl.add_css_class("caption");
+    harness_lbl.add_css_class("dim-label");
+    harness_lbl.set_valign(gtk4::Align::Center);
+    let model_lbl = gtk4::Label::new(Some("Modelo"));
+    model_lbl.add_css_class("caption");
+    model_lbl.add_css_class("dim-label");
+    model_lbl.set_valign(gtk4::Align::Center);
+    row1.append(&harness_lbl);
+    row1.append(&harness_dd);
+    row1.append(&model_lbl);
+    row1.append(&model_dd);
+
+    let row2 = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    row2.set_hexpand(true);
+    let effort_lbl = gtk4::Label::new(Some("Effort"));
+    effort_lbl.add_css_class("caption");
+    effort_lbl.add_css_class("dim-label");
+    effort_lbl.set_valign(gtk4::Align::Center);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    row2.append(&effort_lbl);
+    row2.append(&effort_dd);
+    row2.append(&spacer);
+    row2.append(&apply_btn);
+
+    controls.append(&row1);
+    controls.append(&row2);
     controls.set_visible(has_agent);
     card.append(&controls);
 
@@ -2503,6 +2572,70 @@ pub fn inline_rich_markup(input: &str) -> String {
     out
 }
 
+
+fn harness_display_label(id: &str) -> &str {
+    match id {
+        "antigravity" => "Antigravity",
+        "codex" => "Codex",
+        "claude" => "Claude Code",
+        "hermes" => "Hermes Agent",
+        other => other,
+    }
+}
+
+pub fn merge_catalog_with_saved(
+    catalog: &TraycerCatalog,
+    saved_harness: &str,
+    saved_model: &str,
+    saved_effort: Option<&str>,
+) -> Vec<crate::ipc::TraycerHarnessInfo> {
+    let mut harnesses = catalog.harnesses.clone();
+    let saved_h = saved_harness.trim();
+    let saved_m = saved_model.trim();
+    let fallback_efforts: Vec<String> = saved_effort
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default();
+
+    if !saved_h.is_empty() {
+        if let Some(existing) = harnesses.iter_mut().find(|h| h.id == saved_h) {
+            if !saved_m.is_empty() && !existing.models.iter().any(|m| m.id == saved_m) {
+                existing.models.push(crate::ipc::TraycerModelInfo {
+                    id: saved_m.to_string(),
+                    reasoning_efforts: fallback_efforts,
+                    fast_mode_available: false,
+                });
+            }
+        } else {
+            harnesses.push(crate::ipc::TraycerHarnessInfo {
+                id: saved_h.to_string(),
+                label: harness_display_label(saved_h).to_string(),
+                models: if saved_m.is_empty() {
+                    vec![]
+                } else {
+                    vec![crate::ipc::TraycerModelInfo {
+                        id: saved_m.to_string(),
+                        reasoning_efforts: fallback_efforts,
+                        fast_mode_available: false,
+                    }]
+                },
+            });
+        }
+    }
+
+    if harnesses.is_empty() {
+        harnesses.push(crate::ipc::TraycerHarnessInfo {
+            id: "antigravity".to_string(),
+            label: "Antigravity".to_string(),
+            models: vec![],
+        });
+    }
+
+    crate::traycer_bridge::sort_harnesses(&mut harnesses);
+    harnesses
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2514,5 +2647,62 @@ mod tests {
             m,
             "Teste <b>A &amp; B</b> em <tt>crates/ntm-core</tt> &lt;ok&gt;"
         );
+    }
+
+    #[test]
+    fn merge_catalog_preserves_saved_antigravity_when_catalog_only_has_hermes() {
+        let partial = TraycerCatalog {
+            harnesses: vec![crate::ipc::TraycerHarnessInfo {
+                id: "hermes".into(),
+                label: "Hermes Agent".into(),
+                models: vec![crate::ipc::TraycerModelInfo {
+                    id: "antigravity-subscription-directsdk:gemini-3-flash".into(),
+                    reasoning_efforts: vec![],
+                    fast_mode_available: false,
+                }],
+            }],
+        };
+        let merged = merge_catalog_with_saved(
+            &partial,
+            "antigravity",
+            "gemini-4-hydrogen",
+            Some("high"),
+        );
+        let ids: Vec<_> = merged.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["antigravity", "hermes"]);
+        assert_eq!(merged[0].models[0].id, "gemini-4-hydrogen");
+        assert_eq!(merged[0].models[0].reasoning_efforts, vec!["high"]);
+    }
+
+    #[test]
+    fn merge_catalog_sorts_all_harnesses_and_keeps_missing_saved_model() {
+        let cat = TraycerCatalog {
+            harnesses: vec![
+                crate::ipc::TraycerHarnessInfo {
+                    id: "hermes".into(),
+                    label: "Hermes Agent".into(),
+                    models: vec![],
+                },
+                crate::ipc::TraycerHarnessInfo {
+                    id: "codex".into(),
+                    label: "Codex".into(),
+                    models: vec![crate::ipc::TraycerModelInfo {
+                        id: "gpt-6.2-sol".into(),
+                        reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        fast_mode_available: true,
+                    }],
+                },
+                crate::ipc::TraycerHarnessInfo {
+                    id: "antigravity".into(),
+                    label: "Antigravity".into(),
+                    models: vec![],
+                },
+            ],
+        };
+        let merged = merge_catalog_with_saved(&cat, "codex", "custom-codex", Some("xhigh"));
+        let ids: Vec<_> = merged.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["antigravity", "codex", "hermes"]);
+        let codex = &merged[1];
+        assert!(codex.models.iter().any(|m| m.id == "custom-codex" && m.reasoning_efforts == vec!["xhigh"]));
     }
 }

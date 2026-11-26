@@ -49,7 +49,7 @@ fn is_root() -> bool {
 pub fn list_traycer_models(refresh: bool) -> Result<TraycerCatalog, String> {
     match send_request(
         &DaemonRequest::ListTraycerModels { refresh },
-        Duration::from_secs(25),
+        Duration::from_secs(30),
     ) {
         Ok(DaemonResponse::Models { catalog }) => Ok(catalog),
         Ok(DaemonResponse::Error { message }) => Err(message),

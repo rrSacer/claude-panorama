@@ -284,6 +284,8 @@ struct AppController {
     ui_state: UiViewState,
 
     catalog: RefCell<TraycerCatalog>,
+    catalog_fetch_inflight: Cell<bool>,
+    catalog_retry_count: Cell<u8>,
     hw_specs: RefCell<SystemHardwareSpecs>,
     hw_stats: RefCell<HashMap<String, LiveHardwareStats>>,
     hw_poll_inflight: Cell<bool>,
@@ -463,6 +465,8 @@ fn build_main_window(app: &adw::Application) {
         debounce_scheduled: Cell::new(false),
         ui_state: UiViewState::default(),
         catalog: RefCell::new(TraycerCatalog::default()),
+        catalog_fetch_inflight: Cell::new(false),
+        catalog_retry_count: Cell::new(0),
         hw_specs: RefCell::new(SystemHardwareSpecs::detect()),
         hw_stats: RefCell::new(HashMap::new()),
         hw_poll_inflight: Cell::new(false),
@@ -674,6 +678,9 @@ fn show_toast(ctrl: &Rc<AppController>, msg: &str) {
 }
 
 fn fetch_models_async(ctrl: &Rc<AppController>, refresh: bool, silent: bool) {
+    if ctrl.catalog_fetch_inflight.replace(true) {
+        return;
+    }
     let tx = ctrl.tx.clone();
     std::thread::spawn(move || {
         let catalog = client::list_traycer_models(refresh);
@@ -681,22 +688,61 @@ fn fetch_models_async(ctrl: &Rc<AppController>, refresh: bool, silent: bool) {
     });
 }
 
+fn schedule_catalog_retry(ctrl: &Rc<AppController>) {
+    let attempt = ctrl.catalog_retry_count.get();
+    if attempt >= 5 {
+        return;
+    }
+    ctrl.catalog_retry_count.set(attempt + 1);
+    let delay_secs = (u64::from(attempt) + 1) * 2;
+    let ctrl_weak = Rc::downgrade(ctrl);
+    glib::timeout_add_local_once(Duration::from_secs(delay_secs), move || {
+        if let Some(c) = ctrl_weak.upgrade() {
+            fetch_models_async(&c, true, true);
+        }
+    });
+}
+
 fn handle_gui_event(ctrl: &Rc<AppController>, ev: GuiEvent) {
     match ev {
-        GuiEvent::ModelsLoaded { catalog, silent } => match catalog {
-            Ok(cat) => {
-                *ctrl.catalog.borrow_mut() = cat;
-                render_selected_content(ctrl, true);
-                if !silent {
-                    show_toast(ctrl, "Modelos do Traycer atualizados.");
+        GuiEvent::ModelsLoaded { catalog, silent } => {
+            ctrl.catalog_fetch_inflight.set(false);
+            match catalog {
+                Ok(cat) => {
+                    let count = cat.harnesses.len();
+                    if !cat.harnesses.is_empty() || ctrl.catalog.borrow().harnesses.is_empty() {
+                        *ctrl.catalog.borrow_mut() = cat;
+                        render_selected_content(ctrl, true);
+                    }
+                    if count >= 2 {
+                        ctrl.catalog_retry_count.set(0);
+                        if !silent {
+                            show_toast(
+                                ctrl,
+                                &format!("Modelos do Traycer atualizados ({count} harnesses)."),
+                            );
+                        }
+                    } else {
+                        schedule_catalog_retry(ctrl);
+                        if !silent {
+                            show_toast(
+                                ctrl,
+                                &format!(
+                                    "Catálogo parcial ({count} harness); buscando os demais..."
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    if silent {
+                        schedule_catalog_retry(ctrl);
+                    } else {
+                        show_toast(ctrl, &format!("Erro ao listar modelos do Traycer: {err}"));
+                    }
                 }
             }
-            Err(err) => {
-                if !silent {
-                    show_toast(ctrl, &format!("Erro ao listar modelos do Traycer: {err}"));
-                }
-            }
-        },
+        }
         GuiEvent::AgentFinished { slug, result } => match result {
             Ok(res) => {
                 show_toast(ctrl, &res.message);
@@ -1097,7 +1143,8 @@ fn render_selected_content(ctrl: &Rc<AppController>, preserve_scroll: bool) {
             on_refresh_models: {
                 let ctrl = ctrl.clone();
                 Rc::new(move || {
-                    show_toast(&ctrl, "Buscando modelos disponíveis no Traycer...");
+                    ctrl.catalog_retry_count.set(0);
+                    show_toast(&ctrl, "Buscando harnesses e modelos no Traycer...");
                     fetch_models_async(&ctrl, true, false);
                 })
             },
